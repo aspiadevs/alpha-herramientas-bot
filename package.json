@@ -1,0 +1,20 @@
+{
+  "name": "alpha-herramientas-bot",
+  "version": "1.0.0",
+  "description": "Bot IA para Alpha Herramientas - WSP, IG, FB, TikTok",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.89.0",
+    "express": "^5.2.1"
+  }
+}
