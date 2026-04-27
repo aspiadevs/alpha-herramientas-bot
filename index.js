@@ -48,6 +48,36 @@ function isBudgetExceeded() {
 }
 
 // ============================================================
+// CONTROL DE TAKEOVER HUMANO (48 horas de pausa)
+// ============================================================
+const humanTakeover = new Map(); // contactId → timestamp
+const greeted = new Set();
+const HUMAN_PAUSE_MS = 48 * 60 * 60 * 1000; // 48 horas
+
+function markAsHuman(contactId) {
+  humanTakeover.set(contactId, Date.now());
+  console.log(`[HUMANO] Contacto ${contactId} pausado por 48hrs (${humanTakeover.size} total)`);
+}
+
+function isHumanHandled(contactId) {
+  if (!humanTakeover.has(contactId)) return false;
+  const pausedAt = humanTakeover.get(contactId);
+  if (Date.now() - pausedAt > HUMAN_PAUSE_MS) {
+    humanTakeover.delete(contactId);
+    greeted.delete(contactId); // Para que vuelva a saludar
+    console.log(`[HUMANO] Contacto ${contactId} reactivado (pasaron 48hrs)`);
+    return false;
+  }
+  return true;
+}
+
+function isFirstMessage(contactId) {
+  if (greeted.has(contactId)) return false;
+  greeted.add(contactId);
+  return true;
+}
+
+// ============================================================
 // CACHE DE PRODUCTOS — Jumpseller API
 // ============================================================
 let productCache = [];
@@ -234,15 +264,29 @@ PRODUCTOS RELEVANTES DEL CATÁLOGO:
 // ============================================================
 // LLAMAR A CLAUDE HAIKU 4.5
 // ============================================================
-async function askClaude(userMessage) {
+async function askClaude(userMessage, contactId) {
   if (isBudgetExceeded()) {
     return "🔧 Estamos con alta demanda. Visita alphaherramientas.cl o intenta en unos minutos. ¡Gracias!";
   }
 
+  // Detectar si pide hablar con humano
+  const humanKeywords = ["persona", "humano", "vendedor", "asesor", "hablar con alguien", "agente", "ejecutivo", "atención humana"];
+  const lowerMsg = userMessage.toLowerCase();
+  if (humanKeywords.some(k => lowerMsg.includes(k))) {
+    if (contactId) markAsHuman(contactId);
+    return "¡Claro! Nuestro equipo te responderá lo antes posible 👍 Puedes dejarnos tu mensaje mientras tanto. También puedes ver nuestras herramientas y promociones en 👉 https://www.alphaherramientas.cl/";
+  }
+
+  const firstMsg = contactId ? isFirstMessage(contactId) : true;
+
   const products = await fetchProducts();
   const relevant = searchProducts(userMessage, products);
   const catalog = formatProductsForContext(relevant);
-  const systemPrompt = SYSTEM_PROMPT.replace("{CATALOG}", catalog);
+  let systemPrompt = SYSTEM_PROMPT.replace("{CATALOG}", catalog);
+
+  if (!firstMsg) {
+    systemPrompt += "\n\nIMPORTANTE: Este NO es el primer mensaje del cliente. NO saludes con 'Buenas!' ni '¡Hola!'. Ve directo a la respuesta.";
+  }
 
   try {
     const response = await anthropic.messages.create({
@@ -348,6 +392,10 @@ app.post("/webhook", async (req, res) => {
     // ─── WHATSAPP ───
     if (body.object === "whatsapp_business_account") {
       const changes = body.entry?.[0]?.changes?.[0]?.value;
+
+      // Detectar mensajes enviados por el negocio (echo/status)
+      if (changes?.statuses) return;
+
       if (!changes?.messages) return;
 
       const msg = changes.messages[0];
@@ -355,9 +403,16 @@ app.post("/webhook", async (req, res) => {
 
       const from = msg.from;
       const text = msg.text.body;
+
+      // Si este contacto fue tomado por humano, no responder
+      if (isHumanHandled(from)) {
+        console.log(`[WSP] ${from}: ${text} → IGNORADO (atendido por humano)`);
+        return;
+      }
+
       console.log(`[WSP] ${from}: ${text}`);
 
-      const reply = await askClaude(text);
+      const reply = await askClaude(text, from);
       await sendWhatsApp(from, reply);
       console.log(`[WSP] → ${from}: ${reply.substring(0, 60)}...`);
     }
@@ -366,13 +421,28 @@ app.post("/webhook", async (req, res) => {
     if (body.object === "instagram") {
       const messaging = body.entry?.[0]?.messaging?.[0];
       if (!messaging?.message?.text) return;
-      if (messaging.message.is_echo) return;
+
+      // Detectar echo (mensaje enviado por el negocio/humano)
+      if (messaging.message.is_echo) {
+        const recipientId = messaging.recipient?.id;
+        if (recipientId) {
+          markAsHuman(recipientId);
+        }
+        return;
+      }
 
       const senderId = messaging.sender.id;
       const text = messaging.message.text;
+
+      // Si este contacto fue tomado por humano, no responder
+      if (isHumanHandled(senderId)) {
+        console.log(`[IG] ${senderId}: ${text} → IGNORADO (atendido por humano)`);
+        return;
+      }
+
       console.log(`[IG] ${senderId}: ${text}`);
 
-      const reply = await askClaude(text);
+      const reply = await askClaude(text, senderId);
       await sendMetaMessage(senderId, reply);
       console.log(`[IG] → ${senderId}: ${reply.substring(0, 60)}...`);
     }
@@ -381,13 +451,28 @@ app.post("/webhook", async (req, res) => {
     if (body.object === "page") {
       const messaging = body.entry?.[0]?.messaging?.[0];
       if (!messaging?.message?.text) return;
-      if (messaging.message.is_echo) return;
+
+      // Detectar echo (mensaje enviado por el negocio/humano)
+      if (messaging.message.is_echo) {
+        const recipientId = messaging.recipient?.id;
+        if (recipientId) {
+          markAsHuman(recipientId);
+        }
+        return;
+      }
 
       const senderId = messaging.sender.id;
       const text = messaging.message.text;
+
+      // Si este contacto fue tomado por humano, no responder
+      if (isHumanHandled(senderId)) {
+        console.log(`[FB] ${senderId}: ${text} → IGNORADO (atendido por humano)`);
+        return;
+      }
+
       console.log(`[FB] ${senderId}: ${text}`);
 
-      const reply = await askClaude(text);
+      const reply = await askClaude(text, senderId);
       await sendMetaMessage(senderId, reply);
       console.log(`[FB] → ${senderId}: ${reply.substring(0, 60)}...`);
     }
@@ -416,7 +501,7 @@ app.post("/manychat", async (req, res) => {
     }
 
     console.log(`[TT] ${subscriberId}: ${message}`);
-    const reply = await askClaude(message);
+    const reply = await askClaude(message, `tt_${subscriberId}`);
     console.log(`[TT] → ${subscriberId}: ${reply.substring(0, 60)}...`);
 
     res.json({
