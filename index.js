@@ -323,7 +323,7 @@ async function askClaude(userMessage, contactId) {
 
     const reply = response.content[0].text;
     if (firstMsg) {
-      return reply + "\n\n_¿Prefieres hablar con un ejecutivo? Solo escribe *humano* y te atendemos a la brevedad 👍_";
+      return reply + "\n\n¿Prefieres hablar con un ejecutivo? Solo escribe HUMANO y te atendemos a la brevedad 👍";
     }
     return reply;
   } catch (err) {
