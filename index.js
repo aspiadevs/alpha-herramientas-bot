@@ -438,14 +438,7 @@ app.post("/webhook", async (req, res) => {
       const messaging = body.entry?.[0]?.messaging?.[0];
       if (!messaging?.message?.text) return;
 
-      // Detectar echo (mensaje enviado por el negocio/humano)
-      if (messaging.message.is_echo) {
-        const recipientId = messaging.recipient?.id;
-        if (recipientId) {
-          markAsHuman(recipientId);
-        }
-        return;
-      }
+      if (messaging.message.is_echo) return;
 
       const senderId = messaging.sender.id;
       const text = messaging.message.text;
@@ -468,14 +461,7 @@ app.post("/webhook", async (req, res) => {
       const messaging = body.entry?.[0]?.messaging?.[0];
       if (!messaging?.message?.text) return;
 
-      // Detectar echo (mensaje enviado por el negocio/humano)
-      if (messaging.message.is_echo) {
-        const recipientId = messaging.recipient?.id;
-        if (recipientId) {
-          markAsHuman(recipientId);
-        }
-        return;
-      }
+      if (messaging.message.is_echo) return;
 
       const senderId = messaging.sender.id;
       const text = messaging.message.text;
