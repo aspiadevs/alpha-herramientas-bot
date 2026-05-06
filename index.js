@@ -298,6 +298,37 @@ PRODUCTOS RELEVANTES DEL CATÁLOGO:
 {CATALOG}`;
 
 // ============================================================
+// HISTORIAL DE CONVERSACIÓN (máx 10 mensajes, expira en 24hrs)
+// ============================================================
+const conversationHistory = new Map(); // contactId → { messages: [], lastActivity: timestamp }
+const HISTORY_MAX = 10;
+const HISTORY_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
+function getHistory(contactId) {
+  if (!contactId) return [];
+  const entry = conversationHistory.get(contactId);
+  if (!entry) return [];
+  if (Date.now() - entry.lastActivity > HISTORY_EXPIRY_MS) {
+    conversationHistory.delete(contactId);
+    return [];
+  }
+  return entry.messages;
+}
+
+function addToHistory(contactId, role, content) {
+  if (!contactId) return;
+  if (!conversationHistory.has(contactId)) {
+    conversationHistory.set(contactId, { messages: [], lastActivity: Date.now() });
+  }
+  const entry = conversationHistory.get(contactId);
+  entry.messages.push({ role, content });
+  entry.lastActivity = Date.now();
+  if (entry.messages.length > HISTORY_MAX) {
+    entry.messages = entry.messages.slice(-HISTORY_MAX);
+  }
+}
+
+// ============================================================
 // LLAMAR A CLAUDE HAIKU 4.5
 // ============================================================
 async function askClaude(userMessage, contactId) {
@@ -335,7 +366,7 @@ async function askClaude(userMessage, contactId) {
           cache_control: { type: "ephemeral" },
         },
       ],
-      messages: [{ role: "user", content: userMessage }],
+      messages: [...getHistory(contactId), { role: "user", content: userMessage }],
     });
 
     if (response.usage) {
@@ -346,6 +377,9 @@ async function askClaude(userMessage, contactId) {
     }
 
     const reply = response.content[0].text;
+    addToHistory(contactId, "user", userMessage);
+    addToHistory(contactId, "assistant", reply);
+
     if (firstMsg) {
       return reply + "\n\n¿Prefieres hablar con un ejecutivo? Solo escribe HUMANO y te atendemos a la brevedad 👍";
     }
