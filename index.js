@@ -78,6 +78,30 @@ function isFirstMessage(contactId) {
 }
 
 // ============================================================
+// DEBOUNCE DE MENSAJES — espera 10s para acumular mensajes del mismo contacto
+// ============================================================
+const pendingMessages = new Map(); // contactId → { messages: [], timer }
+const DEBOUNCE_MS = 10000;
+
+function scheduleReply(contactId, text, replyFn) {
+  if (pendingMessages.has(contactId)) {
+    const pending = pendingMessages.get(contactId);
+    clearTimeout(pending.timer);
+    pending.messages.push(text);
+  } else {
+    pendingMessages.set(contactId, { messages: [text] });
+  }
+
+  const pending = pendingMessages.get(contactId);
+  pending.timer = setTimeout(async () => {
+    const combined = pendingMessages.get(contactId)?.messages.join(' ') || text;
+    pendingMessages.delete(contactId);
+    console.log(`[DEBOUNCE] ${contactId}: "${combined}"`);
+    await replyFn(combined);
+  }, DEBOUNCE_MS);
+}
+
+// ============================================================
 // CACHE DE PRODUCTOS — Jumpseller API
 // ============================================================
 let productCache = [];
@@ -428,9 +452,11 @@ app.post("/webhook", async (req, res) => {
 
       console.log(`[WSP] ${from}: ${text}`);
 
-      const reply = await askClaude(text, from);
-      await sendWhatsApp(from, reply);
-      console.log(`[WSP] → ${from}: ${reply.substring(0, 60)}...`);
+      scheduleReply(from, text, async (combined) => {
+        const reply = await askClaude(combined, from);
+        await sendWhatsApp(from, reply);
+        console.log(`[WSP] → ${from}: ${reply.substring(0, 60)}...`);
+      });
     }
 
     // ─── INSTAGRAM ───
@@ -451,9 +477,11 @@ app.post("/webhook", async (req, res) => {
 
       console.log(`[IG] ${senderId}: ${text}`);
 
-      const reply = await askClaude(text, senderId);
-      await sendMetaMessage(senderId, reply);
-      console.log(`[IG] → ${senderId}: ${reply.substring(0, 60)}...`);
+      scheduleReply(senderId, text, async (combined) => {
+        const reply = await askClaude(combined, senderId);
+        await sendMetaMessage(senderId, reply);
+        console.log(`[IG] → ${senderId}: ${reply.substring(0, 60)}...`);
+      });
     }
 
     // ─── FACEBOOK MESSENGER ───
@@ -474,9 +502,11 @@ app.post("/webhook", async (req, res) => {
 
       console.log(`[FB] ${senderId}: ${text}`);
 
-      const reply = await askClaude(text, senderId);
-      await sendMetaMessage(senderId, reply);
-      console.log(`[FB] → ${senderId}: ${reply.substring(0, 60)}...`);
+      scheduleReply(senderId, text, async (combined) => {
+        const reply = await askClaude(combined, senderId);
+        await sendMetaMessage(senderId, reply);
+        console.log(`[FB] → ${senderId}: ${reply.substring(0, 60)}...`);
+      });
     }
   } catch (err) {
     console.error("[WEBHOOK] Error:", err.message);
