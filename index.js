@@ -48,6 +48,33 @@ function isBudgetExceeded() {
 }
 
 // ============================================================
+// DETECCIÓN DE LOOP BOT-VS-BOT
+// Si un contacto envía más de 5 mensajes en 30 segundos → pausar 48hrs
+// ============================================================
+const messageRateTracker = new Map(); // contactId → [timestamps]
+const RATE_WINDOW_MS = 30 * 1000;
+const RATE_MAX_MESSAGES = 5;
+
+function isBotLoop(contactId) {
+  const now = Date.now();
+  if (!messageRateTracker.has(contactId)) {
+    messageRateTracker.set(contactId, []);
+  }
+  const timestamps = messageRateTracker.get(contactId);
+  const recent = timestamps.filter(t => now - t < RATE_WINDOW_MS);
+  recent.push(now);
+  messageRateTracker.set(contactId, recent);
+
+  if (recent.length >= RATE_MAX_MESSAGES) {
+    messageRateTracker.delete(contactId);
+    console.log(`[LOOP] Bot-loop detectado en ${contactId}, pausando 48hrs`);
+    markAsHuman(contactId);
+    return true;
+  }
+  return false;
+}
+
+// ============================================================
 // CONTROL DE TAKEOVER HUMANO (48 horas de pausa)
 // ============================================================
 const humanTakeover = new Map(); // contactId → timestamp
@@ -484,6 +511,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
+      if (isBotLoop(from)) return;
       console.log(`[WSP] ${from}: ${text}`);
 
       scheduleReply(from, text, async (combined) => {
@@ -509,6 +537,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
+      if (isBotLoop(senderId)) return;
       console.log(`[IG] ${senderId}: ${text}`);
 
       scheduleReply(senderId, text, async (combined) => {
@@ -534,6 +563,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
+      if (isBotLoop(senderId)) return;
       console.log(`[FB] ${senderId}: ${text}`);
 
       scheduleReply(senderId, text, async (combined) => {
