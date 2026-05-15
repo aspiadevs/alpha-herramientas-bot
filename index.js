@@ -242,7 +242,8 @@ SOBRE LA TIENDA:
 - Marcas: DeWalt, Milwaukee, Diablo, Stanley, Bosch, Irwin, Uni-T
 - Tienda 100% online, sin local físico. Bodega en La Florida, Santiago.
 - Todo lo que se ve en la web está en stock, no se trabaja a pedido.
-- Web: alphaherramientas.cl
+- Web principal: https://alphaherramientas.cl (mejor precio)
+- Mercado Libre: https://www.mercadolibre.cl/tienda/alpha-herramientas (mismos productos pero con sobrecargo de la plataforma)
 
 ENVÍOS:
 - Despacho diario a las 12:00 hrs todos los días.
