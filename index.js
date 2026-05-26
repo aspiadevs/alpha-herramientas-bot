@@ -371,25 +371,30 @@ function isOrderInquiry(msg) {
 async function lookupOrdersByContact(query) {
   const clean = query.trim();
   const isEmail = clean.includes("@");
-  const phone = clean.replace(/\D/g, "").replace(/^56/, "");
+  const isOrderId = /^\d+$/.test(clean.replace(/[#\s]/g, ""));
 
   try {
-    let customers = [];
-
-    if (isEmail) {
-      const res = await fetch(`https://api.jumpseller.com/v1/customers.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&email=${encodeURIComponent(clean)}`);
-      customers = await res.json();
-    } else if (phone.length >= 8) {
-      const res = await fetch(`https://api.jumpseller.com/v1/customers.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&phone=${phone}`);
-      customers = await res.json();
+    // Buscar por número de pedido
+    if (isOrderId) {
+      const orderId = clean.replace(/[#\s]/g, "");
+      const res = await fetch(`https://api.jumpseller.com/v1/orders/${orderId}.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data?.order ? [data] : null;
     }
 
-    if (!Array.isArray(customers) || customers.length === 0) return null;
+    // Buscar por email
+    if (isEmail) {
+      const res = await fetch(`https://api.jumpseller.com/v1/customers.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&email=${encodeURIComponent(clean)}`);
+      const customers = await res.json();
+      if (!Array.isArray(customers) || customers.length === 0) return null;
+      const customerId = customers[0].customer.id;
+      const ordersRes = await fetch(`https://api.jumpseller.com/v1/customers/${customerId}/orders.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&limit=5`);
+      const orders = await ordersRes.json();
+      return Array.isArray(orders) ? orders : null;
+    }
 
-    const customerId = customers[0].customer.id;
-    const ordersRes = await fetch(`https://api.jumpseller.com/v1/customers/${customerId}/orders.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&limit=5`);
-    const orders = await ordersRes.json();
-    return Array.isArray(orders) ? orders : null;
+    return null;
   } catch (err) {
     console.error("[ORDERS] Error:", err.message);
     return null;
@@ -441,7 +446,7 @@ async function askClaude(userMessage, contactId) {
   // Detectar consulta de pedido
   if (isOrderInquiry(userMessage)) {
     if (contactId) pendingOrderInquiry.add(contactId);
-    return "¡Claro! Para consultar tu pedido dime el teléfono o email que usaste al comprar 📦";
+    return "¡Claro! Para consultar tu pedido dime el número de pedido (ej: #5692) o el email con el que compraste 📦";
   }
 
   // Detectar si pide hablar con humano
