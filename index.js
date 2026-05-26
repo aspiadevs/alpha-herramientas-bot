@@ -383,15 +383,13 @@ async function lookupOrdersByContact(query) {
       return data?.order ? [data] : null;
     }
 
-    // Buscar por email
+    // Buscar por email — filtramos en los pedidos recientes directamente
     if (isEmail) {
-      const res = await fetch(`https://api.jumpseller.com/v1/customers.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&email=${encodeURIComponent(clean)}`);
-      const customers = await res.json();
-      if (!Array.isArray(customers) || customers.length === 0) return null;
-      const customerId = customers[0].customer.id;
-      const ordersRes = await fetch(`https://api.jumpseller.com/v1/customers/${customerId}/orders.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&limit=5`);
-      const orders = await ordersRes.json();
-      return Array.isArray(orders) ? orders : null;
+      const res = await fetch(`https://api.jumpseller.com/v1/orders.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&limit=100&page=1`);
+      const allOrders = await res.json();
+      if (!Array.isArray(allOrders)) return null;
+      const matches = allOrders.filter(o => o.order?.customer?.email?.toLowerCase() === clean.toLowerCase());
+      return matches.length > 0 ? matches.slice(0, 5) : null;
     }
 
     return null;
