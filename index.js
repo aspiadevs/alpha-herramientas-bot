@@ -357,11 +357,91 @@ function addToHistory(contactId, role, content) {
 }
 
 // ============================================================
+// CONSULTA DE PEDIDOS — Jumpseller
+// ============================================================
+const pendingOrderInquiry = new Set(); // contactIds esperando teléfono/email
+
+const ORDER_KEYWORDS = ["pedido", "orden", "seguimiento", "tracking", "cuando llega", "mi compra", "estado de mi", "fue despachado", "fue enviado", "número de orden", "mi encargo"];
+
+function isOrderInquiry(msg) {
+  const lower = msg.toLowerCase();
+  return ORDER_KEYWORDS.some(k => lower.includes(k));
+}
+
+async function lookupOrdersByContact(query) {
+  const clean = query.trim();
+  const isEmail = clean.includes("@");
+  const phone = clean.replace(/\D/g, "").replace(/^56/, "");
+
+  try {
+    let customers = [];
+
+    if (isEmail) {
+      const res = await fetch(`https://api.jumpseller.com/v1/customers.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&email=${encodeURIComponent(clean)}`);
+      customers = await res.json();
+    } else if (phone.length >= 8) {
+      const res = await fetch(`https://api.jumpseller.com/v1/customers.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&phone=${phone}`);
+      customers = await res.json();
+    }
+
+    if (!Array.isArray(customers) || customers.length === 0) return null;
+
+    const customerId = customers[0].customer.id;
+    const ordersRes = await fetch(`https://api.jumpseller.com/v1/customers/${customerId}/orders.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}&limit=5`);
+    const orders = await ordersRes.json();
+    return Array.isArray(orders) ? orders : null;
+  } catch (err) {
+    console.error("[ORDERS] Error:", err.message);
+    return null;
+  }
+}
+
+function formatOrders(orders) {
+  if (!orders || orders.length === 0) return null;
+
+  const statusMap = { paid: "Pagado ✅", fulfilled: "Despachado 📦", pending: "Pendiente ⏳", cancelled: "Cancelado ❌" };
+  const shipMap = { requested: "Solicitado al courier 🔄", in_transit: "En camino 🚚", delivered: "Entregado ✅", failed: "Problema en entrega ⚠️" };
+
+  return orders.slice(0, 3).map(o => {
+    const order = o.order;
+    const status = statusMap[order.status_enum] || order.status_name;
+    const ship = order.shipment_status_enum ? (shipMap[order.shipment_status_enum] || order.shipment_status) : null;
+    const products = order.products.map(p => p.name).join(", ");
+    const trackingMatch = (order.additional_information || "").match(/https?:\/\/[^\s"<]+/);
+    const tracking = order.tracking_url || (trackingMatch ? trackingMatch[0] : null);
+
+    let lines = [`📦 Pedido #${order.id} — ${status}`];
+    if (ship) lines.push(`Envío: ${ship}`);
+    if (products) lines.push(`Producto: ${products}`);
+    if (tracking) lines.push(`Seguimiento: ${tracking}`);
+    return lines.join("\n");
+  }).join("\n\n");
+}
+
+// ============================================================
 // LLAMAR A CLAUDE HAIKU 4.5
 // ============================================================
 async function askClaude(userMessage, contactId) {
   if (isBudgetExceeded()) {
     return "🔧 Estamos con alta demanda. Visita alphaherramientas.cl o intenta en unos minutos. ¡Gracias!";
+  }
+
+  // Si el cliente está en flujo de consulta de pedido, procesar su teléfono/email
+  if (contactId && pendingOrderInquiry.has(contactId)) {
+    pendingOrderInquiry.delete(contactId);
+    console.log(`[ORDERS] Buscando pedidos para: ${userMessage}`);
+    const orders = await lookupOrdersByContact(userMessage);
+    const formatted = formatOrders(orders);
+    if (!formatted) {
+      return "No encontré pedidos con ese dato 🔍 Verifica que sea el mismo teléfono o email que usaste al comprar. Si necesitas ayuda escríbenos a ventas@alphaherramientas.cl";
+    }
+    return `Aquí están tus pedidos más recientes:\n\n${formatted}\n\n¿Necesitas algo más? 👍`;
+  }
+
+  // Detectar consulta de pedido
+  if (isOrderInquiry(userMessage)) {
+    if (contactId) pendingOrderInquiry.add(contactId);
+    return "¡Claro! Para consultar tu pedido dime el teléfono o email que usaste al comprar 📦";
   }
 
   // Detectar si pide hablar con humano
