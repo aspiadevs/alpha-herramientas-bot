@@ -414,8 +414,10 @@ function formatOrders(orders) {
     const products = order.products.map(p => p.name).join(", ");
     const trackingMatch = (order.additional_information || "").match(/https?:\/\/[^\s"<]+/);
     const tracking = order.tracking_url || (trackingMatch ? trackingMatch[0] : null);
+    const customer = order.customer?.fullname;
 
     let lines = [`📦 Pedido #${order.id} — ${status}`];
+    if (customer) lines.push(`Cliente: ${customer}`);
     if (ship) lines.push(`Envío: ${ship}`);
     if (products) lines.push(`Producto: ${products}`);
     if (tracking) lines.push(`Seguimiento: ${tracking}`);
