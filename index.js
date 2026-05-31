@@ -484,7 +484,10 @@ async function askClaude(userMessage, contactId) {
   const dayName = days[now.getDay()];
   const hourCL = now.getHours();
   let systemPrompt = SYSTEM_PROMPT.replace("{CATALOG}", catalog);
-  systemPrompt += `\n\nCONTEXTO ACTUAL: Hoy es ${dayName}. Hora en Chile: ${hourCL}:${String(now.getMinutes()).padStart(2,"0")} hrs.${now.getDay() === 0 ? " HOY ES DOMINGO, no hay despachos hoy. El próximo despacho es mañana lunes a las 12:00 hrs." : hourCL >= 12 ? " Ya pasaron las 12:00 hrs, el próximo despacho es mañana a las 12:00 hrs." : " Aún es antes de las 12:00 hrs, si compran ahora pueden recibir hoy en Santiago."}`;
+  const esDomingo = now.getDay() === 0;
+  const antesDeLas12 = hourCL < 12;
+  let despachoHoy = !esDomingo && antesDeLas12;
+  systemPrompt += `\n\nCONTEXTO ACTUAL: Hoy es ${dayName}. Hora en Chile: ${hourCL}:${String(now.getMinutes()).padStart(2,"0")} hrs. ${esDomingo ? "HOY ES DOMINGO: no hay despachos. Si compran hoy en Santiago, el pedido llegaría mañana lunes." : despachoHoy ? "Aún es antes de las 12:00 hrs: si compran ahora en Santiago, reciben hoy entre 15:00 y 21:00 hrs." : "Ya pasaron las 12:00 hrs: los pedidos de Santiago de hoy llegarán mañana."}`;
 
   if (!firstMsg) {
     systemPrompt += "\n\nIMPORTANTE: Este NO es el primer mensaje del cliente. NO saludes con 'Buenas!' ni '¡Hola!'. Ve directo a la respuesta.";
