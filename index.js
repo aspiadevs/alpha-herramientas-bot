@@ -247,11 +247,12 @@ SOBRE LA TIENDA:
 - Mercado Libre: https://www.mercadolibre.cl/tienda/alpha-herramientas (mismos productos pero con sobrecargo de la plataforma)
 
 ENVÍOS:
-- Despacho diario a las 12:00 hrs todos los días.
-- Santiago (mismo día): compra antes de las 12:00 y recibe entre las 15:00 y 21:00 hrs vía Welivery.
+- Despacho de lunes a sábado a las 12:00 hrs. NO hay despachos los domingos.
+- Santiago (mismo día): compra antes de las 12:00 y recibe entre las 15:00 y 21:00 hrs vía Welivery. Solo días hábiles (lunes a sábado).
 - Regiones: entrega en 24 a 48 hrs. Zonas extremas: hasta 72 hrs.
 - Courier: Starken y Blue Express Copec.
 - No hacen envíos fuera de Chile.
+- Si el cliente pregunta por envío un domingo: aclarar que el próximo despacho es el lunes a las 12:00 hrs.
 
 PAGOS:
 - Mercado Pago: hasta 6 cuotas precio contado (sin interés).
@@ -416,8 +417,22 @@ function formatOrders(orders) {
     const tracking = order.tracking_url || (trackingMatch ? trackingMatch[0] : null);
     const customer = order.customer?.fullname;
 
+    // Hora de completado en Chile (UTC-4)
+    let completedStr = null;
+    let sameDayHint = null;
+    if (order.completed_at) {
+      const utc = new Date(order.completed_at.replace(" UTC", "Z"));
+      const clHour = utc.getUTCHours() - 4; // UTC-4 Chile
+      const clMin = utc.getUTCMinutes();
+      const day = utc.toLocaleDateString("es-CL", { timeZone: "America/Santiago", day: "2-digit", month: "2-digit", year: "numeric" });
+      completedStr = `Pagado el ${day} a las ${String(clHour).padStart(2,"0")}:${String(clMin).padStart(2,"0")} hrs`;
+      if (clHour < 12) sameDayHint = "Compra antes de las 12:00 — si eres de Santiago debería llegar hoy entre 15:00 y 21:00 hrs 🚚";
+    }
+
     let lines = [`📦 Pedido #${order.id} — ${status}`];
     if (customer) lines.push(`Cliente: ${customer}`);
+    if (completedStr) lines.push(completedStr);
+    if (sameDayHint) lines.push(sameDayHint);
     if (ship) lines.push(`Envío: ${ship}`);
     if (products) lines.push(`Producto: ${products}`);
     if (tracking) lines.push(`Seguimiento: ${tracking}`);
@@ -464,7 +479,12 @@ async function askClaude(userMessage, contactId) {
   const products = await fetchProducts();
   const relevant = searchProducts(userMessage, products);
   const catalog = formatProductsForContext(relevant);
+  const days = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Santiago" }));
+  const dayName = days[now.getDay()];
+  const hourCL = now.getHours();
   let systemPrompt = SYSTEM_PROMPT.replace("{CATALOG}", catalog);
+  systemPrompt += `\n\nCONTEXTO ACTUAL: Hoy es ${dayName}. Hora en Chile: ${hourCL}:${String(now.getMinutes()).padStart(2,"0")} hrs.${now.getDay() === 0 ? " HOY ES DOMINGO, no hay despachos hoy. El próximo despacho es mañana lunes a las 12:00 hrs." : hourCL >= 12 ? " Ya pasaron las 12:00 hrs, el próximo despacho es mañana a las 12:00 hrs." : " Aún es antes de las 12:00 hrs, si compran ahora pueden recibir hoy en Santiago."}`;
 
   if (!firstMsg) {
     systemPrompt += "\n\nIMPORTANTE: Este NO es el primer mensaje del cliente. NO saludes con 'Buenas!' ni '¡Hola!'. Ve directo a la respuesta.";
