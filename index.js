@@ -479,11 +479,16 @@ async function askClaude(userMessage, contactId) {
   const products = await fetchProducts();
   const relevant = searchProducts(userMessage, products);
   const catalog = formatProductsForContext(relevant);
-  // Feriados chilenos 2026 — actualizar cada año
+  // Feriados chilenos — actualizar Semana Santa cada año (fecha variable)
   const FERIADOS_CL = new Set([
+    // 2026 — Semana Santa: 2 y 3 abril
     "2026-01-01", "2026-04-02", "2026-04-03", "2026-05-01", "2026-05-21",
     "2026-06-29", "2026-07-16", "2026-08-15", "2026-09-18", "2026-09-19",
-    "2026-10-12", "2026-10-31", "2026-11-01", "2026-12-08", "2026-12-25"
+    "2026-10-12", "2026-10-31", "2026-11-01", "2026-12-08", "2026-12-25",
+    // 2027 — Semana Santa: 25 y 26 marzo
+    "2027-01-01", "2027-03-25", "2027-03-26", "2027-05-01", "2027-05-21",
+    "2027-06-29", "2027-07-16", "2027-08-15", "2027-09-18", "2027-09-19",
+    "2027-10-12", "2027-10-31", "2027-11-01", "2027-12-08", "2027-12-25"
   ]);
 
   const days = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
