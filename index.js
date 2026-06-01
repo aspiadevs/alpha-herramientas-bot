@@ -479,15 +479,24 @@ async function askClaude(userMessage, contactId) {
   const products = await fetchProducts();
   const relevant = searchProducts(userMessage, products);
   const catalog = formatProductsForContext(relevant);
+  // Feriados chilenos 2026 — actualizar cada año
+  const FERIADOS_CL = new Set([
+    "2026-01-01", "2026-04-02", "2026-04-03", "2026-05-01", "2026-05-21",
+    "2026-06-29", "2026-07-16", "2026-08-15", "2026-09-18", "2026-09-19",
+    "2026-10-12", "2026-10-31", "2026-11-01", "2026-12-08", "2026-12-25"
+  ]);
+
   const days = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
   const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Santiago" }));
   const dayName = days[now.getDay()];
   const hourCL = now.getHours();
-  let systemPrompt = SYSTEM_PROMPT.replace("{CATALOG}", catalog);
+  const fechaHoy = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
   const esDomingo = now.getDay() === 0;
+  const esFeriado = FERIADOS_CL.has(fechaHoy);
+  const sinDespacho = esDomingo || esFeriado;
   const antesDeLas12 = hourCL < 12;
-  let despachoHoy = !esDomingo && antesDeLas12;
-  systemPrompt += `\n\nCONTEXTO ACTUAL: Hoy es ${dayName}. Hora en Chile: ${hourCL}:${String(now.getMinutes()).padStart(2,"0")} hrs. ${esDomingo ? "HOY ES DOMINGO: no hay despachos. Si compran hoy en Santiago, el pedido llegaría mañana lunes." : despachoHoy ? "Aún es antes de las 12:00 hrs: si compran ahora en Santiago, reciben hoy entre 15:00 y 21:00 hrs." : "Ya pasaron las 12:00 hrs: los pedidos de Santiago de hoy llegarán mañana."}`;
+  let systemPrompt = SYSTEM_PROMPT.replace("{CATALOG}", catalog);
+  systemPrompt += `\n\nCONTEXTO ACTUAL: Hoy es ${dayName} ${fechaHoy}. Hora en Chile: ${hourCL}:${String(now.getMinutes()).padStart(2,"0")} hrs. ${sinDespacho ? `HOY NO HAY DESPACHOS (${esFeriado ? "feriado" : "domingo"}). Los pedidos de Santiago de hoy llegarán al día hábil siguiente.` : antesDeLas12 ? "Aún es antes de las 12:00 hrs: si compran ahora en Santiago, reciben hoy entre 15:00 y 21:00 hrs." : "Ya pasaron las 12:00 hrs: los pedidos de Santiago de hoy llegarán mañana."}`;
 
   if (!firstMsg) {
     systemPrompt += "\n\nIMPORTANTE: Este NO es el primer mensaje del cliente. NO saludes con 'Buenas!' ni '¡Hola!'. Ve directo a la respuesta.";
