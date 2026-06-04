@@ -265,7 +265,7 @@ DATOS PARA TRANSFERENCIA:
 
 CORREOS:
 - ventas@alphaherramientas.cl → cotizaciones, compras
-- contacto@alphaherramientas.cl → facturación, cambio de boleta a factura
+- contacto@alphaherramientas.cl → SOLO si hubo un problema con la factura (ej: no quedó bien, datos incorrectos)
 
 PRIORIDADES DE RESPUESTA (en este orden):
 1. SIEMPRE dirigir a la web con link inteligente (80% de las consultas)
@@ -313,8 +313,11 @@ Envíos (regiones):
 Cotización:
 "Buenas! 📧 Para cotizar envíanos listado de productos, nombre/razón social, RUT, dirección, correo y teléfono a 👉 ventas@alphaherramientas.cl"
 
-Facturación:
-"Buenas! 📧 Para facturación o cambios envía un correo a 👉 contacto@alphaherramientas.cl con tu número de pedido y datos completos 👍"
+Factura al comprar:
+"Buenas! Sí, puedes seleccionar factura directamente en el proceso de pago en nuestra web 👉 https://alphaherramientas.cl/ 👍"
+
+Problema con factura (no quedó bien, datos incorrectos):
+"Buenas! 📧 Si tuviste un problema con tu factura escríbenos a contacto@alphaherramientas.cl con tu número de pedido y los datos correctos 👍"
 
 Producto agotado:
 "Buenas! 🔧 Ese producto está agotado por ahora, pero puedes ver alternativas aquí 👉 https://alphaherramientas.cl/"
