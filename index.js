@@ -535,7 +535,10 @@ async function askClaude(userMessage, contactId) {
     addToHistory(contactId, "user", userMessage);
     addToHistory(contactId, "assistant", reply);
 
-    if (firstMsg) {
+    // Ofrecer humano recién en el 3er intercambio o más
+    const history = getHistory(contactId);
+    const exchanges = history.filter(m => m.role === "user").length;
+    if (exchanges >= 3) {
       return reply + "\n\n¿Prefieres hablar con un ejecutivo? Solo escribe HUMANO y te atendemos a la brevedad 👍";
     }
     return reply;
