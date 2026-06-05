@@ -292,6 +292,7 @@ REGLAS ESTRICTAS:
 9. Corrige errores de escritura del cliente: tornillador→atornillador, inglatadora→ingleteadora.
 10. Si el producto está agotado, sugiere alternativas o que revise la web.
 11. Si no sabes el nombre técnico de algo que describe el cliente, intenta identificarlo y dar el link de búsqueda.
+12. Si no pudiste resolver la consulta del cliente (consulta técnica compleja, garantías, reclamos, situaciones especiales), agrega ##ESCALAR## al final de tu respuesta. Si la consulta fue resuelta, NO lo incluyas.
 
 PLANTILLAS DE RESPUESTA:
 
@@ -531,14 +532,14 @@ async function askClaude(userMessage, contactId) {
       );
     }
 
-    const reply = response.content[0].text;
+    let reply = response.content[0].text;
+    const necesitaEscalar = reply.includes("##ESCALAR##");
+    reply = reply.replace("##ESCALAR##", "").trim();
+
     addToHistory(contactId, "user", userMessage);
     addToHistory(contactId, "assistant", reply);
 
-    // Ofrecer humano recién en el 3er intercambio o más
-    const history = getHistory(contactId);
-    const exchanges = history.filter(m => m.role === "user").length;
-    if (exchanges >= 3) {
+    if (necesitaEscalar) {
       return reply + "\n\n¿Prefieres hablar con un ejecutivo? Solo escribe HUMANO y te atendemos a la brevedad 👍";
     }
     return reply;
