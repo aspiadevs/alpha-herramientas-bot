@@ -76,26 +76,59 @@ function isBotLoop(contactId) {
 
 // ============================================================
 // CONTROL DE TAKEOVER HUMANO (48 horas de pausa)
+// Durante la pausa el bot solo responde si el cliente escribe por
+// un tema DISTINTO al que motivó la intervención humana.
 // ============================================================
-const humanTakeover = new Map(); // contactId → timestamp
+const humanTakeover = new Map(); // contactId → { pausedAt, topic }
 const greeted = new Set();
 const HUMAN_PAUSE_MS = 48 * 60 * 60 * 1000; // 48 horas
 
 function markAsHuman(contactId) {
-  humanTakeover.set(contactId, Date.now());
+  // Snapshot del tema escalado: últimos mensajes del historial al momento de pausar
+  const topic = getHistory(contactId)
+    .slice(-6)
+    .map(m => `${m.role === "user" ? "Cliente" : "Bot"}: ${m.content}`)
+    .join("\n");
+  humanTakeover.set(contactId, { pausedAt: Date.now(), topic });
   console.log(`[HUMANO] Contacto ${contactId} pausado por 48hrs (${humanTakeover.size} total)`);
 }
 
 function isHumanHandled(contactId) {
-  if (!humanTakeover.has(contactId)) return false;
-  const pausedAt = humanTakeover.get(contactId);
-  if (Date.now() - pausedAt > HUMAN_PAUSE_MS) {
+  const entry = humanTakeover.get(contactId);
+  if (!entry) return false;
+  if (Date.now() - entry.pausedAt > HUMAN_PAUSE_MS) {
     humanTakeover.delete(contactId);
     greeted.delete(contactId); // Para que vuelva a saludar
     console.log(`[HUMANO] Contacto ${contactId} reactivado (pasaron 48hrs)`);
     return false;
   }
   return true;
+}
+
+// Durante un takeover: ¿el mensaje nuevo trata de un tema distinto al escalado?
+async function isNewTopic(contactId, newMessage) {
+  const entry = humanTakeover.get(contactId);
+  if (!entry?.topic) return false; // sin contexto del tema escalado → que responda el humano
+  if (isBudgetExceeded()) return false;
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 5,
+      messages: [{
+        role: "user",
+        content: `Un asesor humano está atendiendo a este cliente de una tienda de herramientas por el siguiente tema pendiente:\n\n${entry.topic}\n\nNuevo mensaje del cliente: "${newMessage}"\n\n¿El nuevo mensaje trata del MISMO tema pendiente o de un tema NUEVO distinto? Responde con una sola palabra: MISMO o NUEVO.`,
+      }],
+    });
+    if (response.usage) {
+      trackSpend(response.usage.input_tokens, response.usage.output_tokens);
+    }
+    const verdict = response.content[0].text.trim().toUpperCase();
+    console.log(`[TEMA] ${contactId}: ${verdict}`);
+    return verdict.includes("NUEVO");
+  } catch (err) {
+    console.error("[TEMA] Error:", err.message);
+    return false; // ante la duda, que responda el humano
+  }
 }
 
 function isFirstMessage(contactId) {
@@ -263,9 +296,28 @@ DATOS PARA TRANSFERENCIA:
 - Titular: COMERCIALIZADORA EDUARDO OYARZO SpA
 - (Si el cliente pide datos bancarios completos, derivar a ventas@alphaherramientas.cl)
 
-CORREOS:
+CORREOS Y TELÉFONO:
 - ventas@alphaherramientas.cl → cotizaciones, compras
-- contacto@alphaherramientas.cl → SOLO si hubo un problema con la factura (ej: no quedó bien, datos incorrectos)
+- contacto@alphaherramientas.cl → problemas con la factura, servicio técnico y garantías
+- Teléfono +56 9 7821 3479 → atención personalizada, dudas importantes, cotizaciones grandes
+
+SERVICIO TÉCNICO Y GARANTÍAS (si el cliente informa una falla de su herramienta):
+- DeWalt y Stanley: puede escribir a contacto@alphaherramientas.cl explicando el problema, o acudir al Servicio Técnico Autorizado llevando su boleta o factura. Comparte siempre este link: https://alphaherramientas.cl/servicios-tecnicos-dewalt
+- Milwaukee y Diablo: pedir que escriba a contacto@alphaherramientas.cl explicando el problema. NO derivar a servicio técnico directamente.
+- NUNCA prometas garantías ni resultados: cada caso lo evalúa el equipo.
+
+REPUESTOS:
+- NO vendemos repuestos. Informarlo claramente.
+- Derivar al servicio técnico autorizado. Si es DeWalt o Stanley comparte: https://alphaherramientas.cl/servicios-tecnicos-dewalt
+- NUNCA prometas disponibilidad de repuestos.
+
+OFERTAS (si preguntan por ofertas, promociones, descuentos o precios rebajados):
+- Comparte: https://alphaherramientas.cl/ofertas
+- Y agrega: también tenemos ofertas que incluyen regalos en https://alphaherramientas.cl/exlusivos/ofertas-con-regalos (usar esta URL EXACTA, así escrita)
+- NUNCA inventes promociones ni descuentos.
+
+VENTAS GRANDES (compras sobre $200.000, empresas, instituciones, compras por volumen, licitaciones, proyectos):
+- No respondas solo con un enlace. Responde: "Con gusto te ayudaremos con tu cotización o compra 🔧 Para una atención más personalizada escríbenos a ventas@alphaherramientas.cl o llámanos al +56 9 7821 3479 👍"
 
 PRIORIDADES DE RESPUESTA (en este orden):
 1. SIEMPRE dirigir a la web con link inteligente (80% de las consultas)
@@ -293,6 +345,10 @@ REGLAS ESTRICTAS:
 10. Si el producto está agotado, sugiere alternativas o que revise la web.
 11. Si no sabes el nombre técnico de algo que describe el cliente, intenta identificarlo y dar el link de búsqueda.
 12. Si no pudiste resolver la consulta del cliente (consulta técnica compleja, garantías, reclamos, situaciones especiales), agrega ##ESCALAR## al final de tu respuesta. Si la consulta fue resuelta, NO lo incluyas.
+13. NUNCA inventes productos, enlaces, categorías, promociones, descuentos ni especificaciones técnicas. Usa SOLO la información del catálogo proporcionado y los enlaces oficiales de este prompt o el buscador (search?q=).
+14. Tiempos de entrega: promete SOLO los publicados (mismo día en Santiago comprando antes de las 12:00, 24-48 hrs regiones, hasta 72 hrs zonas extremas). Nunca otros plazos ni condiciones especiales.
+15. Revisa el historial antes de responder: no repitas preguntas que el cliente ya respondió, no envíes la misma respuesta dos veces, y si el cliente cambia de tema sigue el tema nuevo.
+16. Si después de 4 o 5 intercambios la conversación no avanza o no logras resolver la consulta, agrega ##ESCALAR## al final de tu respuesta.
 
 PLANTILLAS DE RESPUESTA:
 
@@ -333,11 +389,11 @@ PRODUCTOS RELEVANTES DEL CATÁLOGO:
 {CATALOG}`;
 
 // ============================================================
-// HISTORIAL DE CONVERSACIÓN (máx 10 mensajes, expira en 24hrs)
+// HISTORIAL DE CONVERSACIÓN (últimos 20 mensajes, expira en 7 días)
 // ============================================================
 const conversationHistory = new Map(); // contactId → { messages: [], lastActivity: timestamp }
-const HISTORY_MAX = 10;
-const HISTORY_EXPIRY_MS = 24 * 60 * 60 * 1000;
+const HISTORY_MAX = 20;
+const HISTORY_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
 function getHistory(contactId) {
   if (!contactId) return [];
@@ -474,7 +530,11 @@ async function askClaude(userMessage, contactId) {
   const humanKeywords = ["persona", "humano", "vendedor", "asesor", "hablar con alguien", "agente", "ejecutivo", "atención humana"];
   const lowerMsg = userMessage.toLowerCase();
   if (humanKeywords.some(k => lowerMsg.includes(k))) {
-    if (contactId) markAsHuman(contactId);
+    if (contactId) {
+      // Registrar el mensaje antes de pausar: suele traer el motivo de la escalada
+      addToHistory(contactId, "user", userMessage);
+      markAsHuman(contactId);
+    }
     return "¡Claro! Nuestro equipo te responderá lo antes posible 👍 Puedes dejarnos tu mensaje mientras tanto. También puedes ver nuestras herramientas y promociones en 👉 https://www.alphaherramientas.cl/";
   }
 
@@ -540,7 +600,7 @@ async function askClaude(userMessage, contactId) {
     addToHistory(contactId, "assistant", reply);
 
     if (necesitaEscalar) {
-      return reply + "\n\n¿Prefieres hablar con un ejecutivo? Solo escribe HUMANO y te atendemos a la brevedad 👍";
+      return reply + "\n\nQuiero ayudarte de la mejor manera. Escribe HUMANO para que un asesor continúe atendiéndote, o si prefieres llámanos al +56 9 7821 3479 👍";
     }
     return reply;
   } catch (err) {
@@ -637,16 +697,16 @@ app.post("/webhook", async (req, res) => {
       const from = msg.from;
       const text = msg.text.body;
 
-      // Si este contacto fue tomado por humano, no responder
-      if (isHumanHandled(from)) {
-        console.log(`[WSP] ${from}: ${text} → IGNORADO (atendido por humano)`);
-        return;
-      }
-
       if (isBotLoop(from)) return;
       console.log(`[WSP] ${from}: ${text}`);
 
       scheduleReply(from, text, async (combined) => {
+        // Takeover humano: solo responder si el cliente escribe por un tema nuevo
+        if (isHumanHandled(from) && !(await isNewTopic(from, combined))) {
+          console.log(`[WSP] ${from} → IGNORADO (mismo tema, atendido por humano)`);
+          addToHistory(from, "user", combined);
+          return;
+        }
         const reply = await askClaude(combined, from);
         await sendWhatsApp(from, reply);
         console.log(`[WSP] → ${from}: ${reply.substring(0, 60)}...`);
@@ -663,16 +723,16 @@ app.post("/webhook", async (req, res) => {
       const senderId = messaging.sender.id;
       const text = messaging.message.text;
 
-      // Si este contacto fue tomado por humano, no responder
-      if (isHumanHandled(senderId)) {
-        console.log(`[IG] ${senderId}: ${text} → IGNORADO (atendido por humano)`);
-        return;
-      }
-
       if (isBotLoop(senderId)) return;
       console.log(`[IG] ${senderId}: ${text}`);
 
       scheduleReply(senderId, text, async (combined) => {
+        // Takeover humano: solo responder si el cliente escribe por un tema nuevo
+        if (isHumanHandled(senderId) && !(await isNewTopic(senderId, combined))) {
+          console.log(`[IG] ${senderId} → IGNORADO (mismo tema, atendido por humano)`);
+          addToHistory(senderId, "user", combined);
+          return;
+        }
         const reply = await askClaude(combined, senderId);
         await sendMetaMessage(senderId, reply);
         console.log(`[IG] → ${senderId}: ${reply.substring(0, 60)}...`);
@@ -689,16 +749,16 @@ app.post("/webhook", async (req, res) => {
       const senderId = messaging.sender.id;
       const text = messaging.message.text;
 
-      // Si este contacto fue tomado por humano, no responder
-      if (isHumanHandled(senderId)) {
-        console.log(`[FB] ${senderId}: ${text} → IGNORADO (atendido por humano)`);
-        return;
-      }
-
       if (isBotLoop(senderId)) return;
       console.log(`[FB] ${senderId}: ${text}`);
 
       scheduleReply(senderId, text, async (combined) => {
+        // Takeover humano: solo responder si el cliente escribe por un tema nuevo
+        if (isHumanHandled(senderId) && !(await isNewTopic(senderId, combined))) {
+          console.log(`[FB] ${senderId} → IGNORADO (mismo tema, atendido por humano)`);
+          addToHistory(senderId, "user", combined);
+          return;
+        }
         const reply = await askClaude(combined, senderId);
         await sendMetaMessage(senderId, reply);
         console.log(`[FB] → ${senderId}: ${reply.substring(0, 60)}...`);
