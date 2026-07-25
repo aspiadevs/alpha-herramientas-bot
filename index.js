@@ -244,7 +244,20 @@ function searchProducts(query, products) {
   return scored.map((item) => item.product);
 }
 
-function formatProductsForContext(products) {
+function cleanDescription(html) {
+  if (!html) return "";
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&aacute;/gi, "á").replace(/&eacute;/gi, "é").replace(/&iacute;/gi, "í")
+    .replace(/&oacute;/gi, "ó").replace(/&uacute;/gi, "ú").replace(/&ntilde;/gi, "ñ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 400);
+}
+
+function formatProductsForContext(products, includeSpecs = false) {
   return products
     .map((p) => {
       const price = p.price
@@ -261,8 +274,85 @@ function formatProductsForContext(products) {
       const link = p.permalink
         ? `https://alphaherramientas.cl${p.permalink}`
         : "";
-      return `- ${p.name} | ${brand} | ${price} | ${stock} | SKU: ${sku} | ${link}`;
+      let line = `- ${p.name} | ${brand} | ${price} | ${stock} | SKU: ${sku} | ${link}`;
+      if (includeSpecs) {
+        const specs = cleanDescription(p.description);
+        if (specs) line += `\n  Ficha: ${specs}`;
+      }
+      return line;
     })
+    .join("\n");
+}
+
+// Detecta consultas comparativas ("cuál es mejor", "qué diferencia hay", etc.)
+function isComparisonQuery(msg) {
+  const m = msg
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  return /(cual (es )?mejor|mejor entre|recomiendas|recomienda|que diferencia|diferencias?\s|comparar|comparacion|\bvs\.?\b|versus)/.test(m);
+}
+
+// ============================================================
+// CACHE DE CATEGORÍAS — Jumpseller API (links oficiales)
+// ============================================================
+let categoryCache = [];
+let categoryCacheTimestamp = 0;
+
+async function fetchCategories() {
+  const now = Date.now();
+  if (categoryCache.length > 0 && now - categoryCacheTimestamp < CACHE_DURATION) {
+    return categoryCache;
+  }
+
+  try {
+    // Nota: este endpoint entrega todas las categorías de una vez (ignora paginación)
+    const url = `https://api.jumpseller.com/v1/categories.json?login=${JUMPSELLER_LOGIN}&authtoken=${JUMPSELLER_TOKEN}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.error(`[JUMPSELLER] Error HTTP ${res.status} cargando categorías`);
+      return categoryCache;
+    }
+    const data = await res.json();
+    const categories = (data || [])
+      .map((c) => c.category)
+      .filter((c) => c?.permalink && c.name.toLowerCase() !== "todos los productos");
+    if (categories.length > 0) {
+      categoryCache = categories;
+      categoryCacheTimestamp = now;
+      console.log(`[CACHE] ${categoryCache.length} categorías cargadas`);
+    }
+  } catch (err) {
+    console.error("[CACHE] Error categorías:", err.message);
+  }
+
+  return categoryCache;
+}
+
+function searchCategories(query, categories) {
+  const terms = query
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .split(/\s+/)
+    .filter((t) => t.length > 2);
+  if (terms.length === 0) return [];
+
+  return categories
+    .filter((c) => {
+      const name = c.name
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+      return terms.some((t) => name.includes(t));
+    })
+    .slice(0, 8);
+}
+
+function formatCategoriesForContext(categories) {
+  // El permalink de categorías viene SIN slash inicial (distinto a productos)
+  return categories
+    .map((c) => `- ${c.name}: https://alphaherramientas.cl/${c.permalink}`)
     .join("\n");
 }
 
@@ -324,13 +414,21 @@ PRIORIDADES DE RESPUESTA (en este orden):
 2. Dar info clave cuando aplique: envíos, ubicación, métodos de pago (15%)
 3. Derivar a correo SOLO si es cotización o facturación (5%)
 
-LINK INTELIGENTE — SIEMPRE usar este formato cuando pregunten por un producto:
+CATEGORÍAS OFICIALES RELEVANTES PARA ESTA CONSULTA (si alguna calza con lo que busca el cliente, comparte su link oficial en vez del buscador):
+{CATEGORIES}
+
+LINK INTELIGENTE — usar este formato cuando pregunten por un producto y NO haya una categoría oficial que calce:
 👉 https://alphaherramientas.cl/search?q=PRODUCTO
 Ejemplos:
 - "atornillador" → https://alphaherramientas.cl/search?q=atornillador
 - "disco metal" → https://alphaherramientas.cl/search?q=disco+metal
 - "batería dewalt" → https://alphaherramientas.cl/search?q=bateria+dewalt
 - "nivel láser" → https://alphaherramientas.cl/search?q=nivel+laser
+
+COMPARACIÓN DE PRODUCTOS (cuando pregunten cuál es mejor, qué diferencia hay o pidan una recomendación):
+- Compara usando SOLO los datos de las fichas del catálogo (potencia, voltaje, capacidad, peso, aplicaciones).
+- Si un dato no aparece en la ficha, dilo claramente (ej: "la ficha no indica el peso").
+- Cierra recomendando según el uso que menciona el cliente y comparte los links de los productos comparados.
 
 REGLAS ESTRICTAS:
 1. Respuestas CORTAS: máximo 2-3 oraciones. Esto es un chat, no un email.
@@ -542,7 +640,13 @@ async function askClaude(userMessage, contactId) {
 
   const products = await fetchProducts();
   const relevant = searchProducts(userMessage, products);
-  const catalog = formatProductsForContext(relevant);
+  // Consulta comparativa: menos productos pero con ficha técnica incluida
+  const comparing = isComparisonQuery(userMessage);
+  const catalog = comparing
+    ? formatProductsForContext(relevant.slice(0, 6), true)
+    : formatProductsForContext(relevant);
+  const categories = searchCategories(userMessage, await fetchCategories());
+  const categoriesText = formatCategoriesForContext(categories);
   // Feriados chilenos — actualizar Semana Santa cada año (fecha variable)
   const FERIADOS_CL = new Set([
     // 2026 — Semana Santa: 2 y 3 abril
@@ -564,7 +668,10 @@ async function askClaude(userMessage, contactId) {
   const esFeriado = FERIADOS_CL.has(fechaHoy);
   const sinDespacho = esDomingo || esFeriado;
   const antesDeLas12 = hourCL < 12;
-  let systemPrompt = SYSTEM_PROMPT.replace("{CATALOG}", catalog);
+  let systemPrompt = SYSTEM_PROMPT.replace("{CATALOG}", catalog).replace(
+    "{CATEGORIES}",
+    categoriesText || "(ninguna calza con esta consulta — usa el buscador)"
+  );
   systemPrompt += `\n\nCONTEXTO ACTUAL: Hoy es ${dayName} ${fechaHoy}. Hora en Chile: ${hourCL}:${String(now.getMinutes()).padStart(2,"0")} hrs. ${sinDespacho ? `HOY NO HAY DESPACHOS (${esFeriado ? "feriado" : "domingo"}). Los pedidos de Santiago de hoy llegarán al día hábil siguiente.` : antesDeLas12 ? "Aún es antes de las 12:00 hrs: si compran ahora en Santiago, reciben hoy entre 15:00 y 21:00 hrs." : "Ya pasaron las 12:00 hrs: los pedidos de Santiago de hoy llegarán mañana."}`;
 
   if (!firstMsg) {
