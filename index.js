@@ -76,8 +76,9 @@ function isBotLoop(contactId) {
 
 // ============================================================
 // CONTROL DE TAKEOVER HUMANO (48 horas de pausa)
-// Durante la pausa el bot solo responde si el cliente escribe por
-// un tema DISTINTO al que motivó la intervención humana.
+// Durante la pausa el bot guarda silencio total. Al vencer la pausa,
+// si el cliente sigue con el MISMO tema que atendía el asesor, la
+// pausa se renueva otras 48hrs; solo con un tema nuevo actúa el bot.
 // ============================================================
 const humanTakeover = new Map(); // contactId → { pausedAt, topic }
 const greeted = new Set();
@@ -93,15 +94,33 @@ function markAsHuman(contactId) {
   console.log(`[HUMANO] Contacto ${contactId} pausado por 48hrs (${humanTakeover.size} total)`);
 }
 
-function isHumanHandled(contactId) {
+async function shouldStaySilent(contactId, message) {
   const entry = humanTakeover.get(contactId);
   if (!entry) return false;
-  if (Date.now() - entry.pausedAt > HUMAN_PAUSE_MS) {
+
+  // Pausa vigente: silencio total, el asesor está atendiendo
+  if (Date.now() - entry.pausedAt <= HUMAN_PAUSE_MS) return true;
+
+  // Pausa vencida sin contexto del tema escalado: reactivar (comportamiento clásico)
+  if (!entry.topic) {
     humanTakeover.delete(contactId);
     greeted.delete(contactId); // Para que vuelva a saludar
-    console.log(`[HUMANO] Contacto ${contactId} reactivado (pasaron 48hrs)`);
+    console.log(`[HUMANO] Contacto ${contactId} reactivado (pasaron 48hrs, sin tema registrado)`);
     return false;
   }
+
+  // Pausa vencida: ¿sigue con el mismo tema que atendía el asesor?
+  const temaNuevo = await isNewTopic(contactId, message);
+  if (temaNuevo) {
+    humanTakeover.delete(contactId);
+    greeted.delete(contactId); // Para que vuelva a saludar
+    console.log(`[HUMANO] Contacto ${contactId} reactivado (tema nuevo tras la pausa)`);
+    return false;
+  }
+
+  // Mismo tema: renovar la pausa otras 48hrs y seguir en silencio
+  entry.pausedAt = Date.now();
+  console.log(`[HUMANO] Contacto ${contactId} sigue con el mismo tema — pausa renovada 48hrs`);
   return true;
 }
 
@@ -808,9 +827,9 @@ app.post("/webhook", async (req, res) => {
       console.log(`[WSP] ${from}: ${text}`);
 
       scheduleReply(from, text, async (combined) => {
-        // Takeover humano: solo responder si el cliente escribe por un tema nuevo
-        if (isHumanHandled(from) && !(await isNewTopic(from, combined))) {
-          console.log(`[WSP] ${from} → IGNORADO (mismo tema, atendido por humano)`);
+        // Takeover humano: silencio durante la pausa; tras vencer, solo tema nuevo
+        if (await shouldStaySilent(from, combined)) {
+          console.log(`[WSP] ${from} → IGNORADO (atendido por humano)`);
           addToHistory(from, "user", combined);
           return;
         }
@@ -834,9 +853,9 @@ app.post("/webhook", async (req, res) => {
       console.log(`[IG] ${senderId}: ${text}`);
 
       scheduleReply(senderId, text, async (combined) => {
-        // Takeover humano: solo responder si el cliente escribe por un tema nuevo
-        if (isHumanHandled(senderId) && !(await isNewTopic(senderId, combined))) {
-          console.log(`[IG] ${senderId} → IGNORADO (mismo tema, atendido por humano)`);
+        // Takeover humano: silencio durante la pausa; tras vencer, solo tema nuevo
+        if (await shouldStaySilent(senderId, combined)) {
+          console.log(`[IG] ${senderId} → IGNORADO (atendido por humano)`);
           addToHistory(senderId, "user", combined);
           return;
         }
@@ -860,9 +879,9 @@ app.post("/webhook", async (req, res) => {
       console.log(`[FB] ${senderId}: ${text}`);
 
       scheduleReply(senderId, text, async (combined) => {
-        // Takeover humano: solo responder si el cliente escribe por un tema nuevo
-        if (isHumanHandled(senderId) && !(await isNewTopic(senderId, combined))) {
-          console.log(`[FB] ${senderId} → IGNORADO (mismo tema, atendido por humano)`);
+        // Takeover humano: silencio durante la pausa; tras vencer, solo tema nuevo
+        if (await shouldStaySilent(senderId, combined)) {
+          console.log(`[FB] ${senderId} → IGNORADO (atendido por humano)`);
           addToHistory(senderId, "user", combined);
           return;
         }
