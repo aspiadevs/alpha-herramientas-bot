@@ -16,6 +16,7 @@ const {
   WEBHOOK_VERIFY_TOKEN,
   JUMPSELLER_LOGIN,
   JUMPSELLER_TOKEN,
+  CAMPAIGNS_SHEET_ID,
   MONTHLY_AI_BUDGET = "15",
 } = process.env;
 
@@ -376,6 +377,239 @@ function formatCategoriesForContext(categories) {
 }
 
 // ============================================================
+// CAMPAÑAS Y DATOS GENERALES — Google Sheets editable por la tienda
+// La planilla debe estar compartida como "Cualquier persona con el enlace: Lector".
+// Pestaña "Campañas": Campaña | Qué debe decir el bot | Condiciones | Link | Inicio | Término | Activa
+// Pestaña "Datos generales": Tema | Información
+//   (la fila "Hora de corte despacho" define la hora límite para envío el mismo día)
+// ============================================================
+const SHEET_CACHE_MS = 5 * 60 * 1000;
+const CAMPAIGN_ENDED_DAYS = 15; // días que una campaña vencida se sigue informando como TERMINADA
+const SHEET_TEXT_MAX = 1000; // límite de caracteres por celda, para no inflar el prompt
+const SHEET_TIMEOUT_MS = 8000; // si Google no responde, se sigue con la última versión en vez de dejar esperando al cliente
+const HORA_CORTE_DEFAULT = { texto: "12:00", minutos: 12 * 60 };
+
+let sheetData = { campaigns: [], general: [], horaCorte: null, skipped: [], error: null };
+let sheetCheckedAt = 0;
+let sheetLoading = null; // carga en curso: quien llega mientras tanto la espera (al iniciar, la versión anterior está vacía)
+
+function normalizeText(text) {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .trim();
+}
+
+// Parser CSV mínimo: soporta comillas, comillas escapadas ("") y saltos de línea dentro de una celda
+function parseCSV(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"' && text[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else if (c === '"') {
+        inQuotes = false;
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      row.push(field);
+      field = "";
+    } else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    } else {
+      field += c;
+    }
+  }
+  if (field || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+// Descarga una pestaña como CSV → [{ encabezado_normalizado: valor }]
+async function fetchSheetTab(tabName, requiredColumns) {
+  const url = `https://docs.google.com/spreadsheets/d/${CAMPAIGNS_SHEET_ID}/gviz/tq?tqx=out:csv&headers=1&sheet=${encodeURIComponent(tabName)}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(SHEET_TIMEOUT_MS) });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} en pestaña "${tabName}" (revisar el ID y que esté compartida con "cualquier persona con el enlace")`);
+  }
+  // Si la planilla no es pública, Google redirige al login y entrega HTML
+  if ((res.headers.get("content-type") || "").includes("text/html")) {
+    throw new Error(`la planilla no está compartida con "cualquier persona con el enlace" (pestaña "${tabName}")`);
+  }
+
+  const [header = [], ...rows] = parseCSV(await res.text());
+  const keys = header.map(normalizeText);
+  // Si la pestaña no existe Google entrega la primera, por eso se validan los encabezados
+  const missing = requiredColumns.filter((col) => !keys.some((k) => k.startsWith(col)));
+  if (missing.length > 0) {
+    throw new Error(`a la pestaña "${tabName}" le faltan columnas: ${missing.join(", ")}`);
+  }
+
+  return rows
+    .filter((r) => r.some((cell) => cell.trim()))
+    .map((r) => Object.fromEntries(keys.map((k, i) => [k, (r[i] || "").replace(/\s+/g, " ").trim().slice(0, SHEET_TEXT_MAX)])));
+}
+
+// Valor de la primera columna cuyo encabezado empieza con alguno de los prefijos
+function pickColumn(row, ...prefixes) {
+  const key = Object.keys(row).find((k) => prefixes.some((p) => k.startsWith(p)));
+  return key ? row[key] : "";
+}
+
+// Acepta DD/MM/AAAA, DD-MM-AAAA (formato Chile) o AAAA-MM-DD → "AAAA-MM-DD", o null si no es válida
+function parseSheetDate(text) {
+  let y, mo, d;
+  let m = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (m) [, y, mo, d] = m;
+  else if ((m = text.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/))) [, d, mo, y] = m;
+  else return null;
+  const date = new Date(Date.UTC(+y, +mo - 1, +d));
+  if (date.getUTCMonth() !== +mo - 1) return null; // ej: 31/02 o mes 13
+  return date.toISOString().slice(0, 10);
+}
+
+// "11", "11:30", "11:30 hrs" → { texto: "11:30", minutos: 690 }
+function parseHoraCorte(text) {
+  const m = text.match(/^(\d{1,2})(?:[:.](\d{2}))?/);
+  if (!m) return null;
+  const h = +m[1];
+  const min = +(m[2] || 0);
+  if (h > 23 || min > 59) return null;
+  return { texto: `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`, minutos: h * 60 + min };
+}
+
+function parseCampaignRow(row, skipped) {
+  const nombre = pickColumn(row, "campana");
+  const inicioRaw = pickColumn(row, "inicio");
+  const terminoRaw = pickColumn(row, "termino");
+  const inicio = inicioRaw ? parseSheetDate(inicioRaw) : null;
+  const termino = terminoRaw ? parseSheetDate(terminoRaw) : null;
+  if (!nombre || (inicioRaw && !inicio) || (terminoRaw && !termino)) {
+    skipped.push(`Campañas: "${nombre || "(sin nombre)"}" — revisar nombre o fechas (inicio "${inicioRaw}", término "${terminoRaw}")`);
+    return null;
+  }
+  return {
+    nombre,
+    mensaje: pickColumn(row, "que debe decir", "mensaje", "descripcion"),
+    condiciones: pickColumn(row, "condicion"),
+    link: pickColumn(row, "link", "url"),
+    inicio,
+    termino,
+    activa: !/^(no|n|false|falso|0)$/.test(normalizeText(pickColumn(row, "activa"))),
+  };
+}
+
+async function fetchSheetData() {
+  if (sheetLoading) return sheetLoading;
+  if (!CAMPAIGNS_SHEET_ID || Date.now() - sheetCheckedAt < SHEET_CACHE_MS) return sheetData;
+  sheetCheckedAt = Date.now();
+  sheetLoading = loadSheetData().finally(() => { sheetLoading = null; });
+  return sheetLoading;
+}
+
+async function loadSheetData() {
+  // Cada pestaña se carga por separado: si una falla, se mantiene su última versión buena
+  let { campaigns, general, horaCorte } = sheetData;
+  const skipped = [];
+  const errors = [];
+
+  try {
+    const rows = await fetchSheetTab("Campañas", ["campana", "inicio", "termino"]);
+    campaigns = rows.map((row) => parseCampaignRow(row, skipped)).filter(Boolean);
+  } catch (err) {
+    errors.push(err.message);
+  }
+
+  try {
+    const rows = await fetchSheetTab("Datos generales", ["tema", "informacion"]);
+    general = [];
+    horaCorte = null;
+    for (const row of rows) {
+      const tema = pickColumn(row, "tema");
+      const info = pickColumn(row, "informacion");
+      if (!info) continue;
+      if (normalizeText(tema).startsWith("hora de corte")) {
+        horaCorte = parseHoraCorte(info);
+        if (!horaCorte) skipped.push(`Datos generales: hora de corte "${info}" no válida, se usa ${HORA_CORTE_DEFAULT.texto}`);
+      } else {
+        general.push({ tema, info });
+      }
+    }
+  } catch (err) {
+    errors.push(err.message);
+  }
+
+  sheetData = { campaigns, general, horaCorte, skipped, error: errors.join(" | ") || null };
+  if (sheetData.error) {
+    console.error(`[SHEET] Error (se mantiene la última versión): ${sheetData.error}`);
+  } else {
+    console.log(`[SHEET] ${campaigns.length} campañas y ${general.length} datos generales cargados`);
+  }
+  for (const s of skipped) console.warn(`[SHEET] Fila omitida — ${s}`);
+
+  return sheetData;
+}
+
+function getHoraCorte() {
+  return sheetData.horaCorte || HORA_CORTE_DEFAULT;
+}
+
+function todayChile() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/Santiago" }); // AAAA-MM-DD
+}
+
+function formatDateCL(isoDate) {
+  return isoDate.split("-").reverse().join("-");
+}
+
+function campaignStatus(campaign, today) {
+  if (!campaign.activa) return "inactiva";
+  if (campaign.inicio && today < campaign.inicio) return "futura";
+  if (campaign.termino && today > campaign.termino) {
+    const daysEnded = (Date.parse(today) - Date.parse(campaign.termino)) / 86400000;
+    return daysEnded <= CAMPAIGN_ENDED_DAYS ? "terminada" : "vencida";
+  }
+  return "vigente";
+}
+
+function formatCampaignsForContext(campaigns, today) {
+  const active = campaigns
+    .filter((c) => campaignStatus(c, today) === "vigente")
+    .map((c) => {
+      let line = `- ${c.nombre}${c.termino ? ` (válida hasta el ${formatDateCL(c.termino)} inclusive)` : ""} | ${c.mensaje}`;
+      if (c.condiciones) line += ` | Condiciones: ${c.condiciones}`;
+      if (c.link) line += ` | Link: ${c.link}`;
+      return line;
+    });
+  const ended = campaigns
+    .filter((c) => campaignStatus(c, today) === "terminada")
+    .map((c) => `- ${c.nombre} (terminó el ${formatDateCL(c.termino)})`);
+  return {
+    active: active.join("\n") || "(no hay campañas vigentes en este momento)",
+    ended: ended.join("\n") || "(ninguna)",
+  };
+}
+
+function formatGeneralInfoForContext(general) {
+  return general.map((g) => `- ${g.tema}: ${g.info}`).join("\n") || "(sin información adicional)";
+}
+
+// ============================================================
 // SYSTEM PROMPT
 // ============================================================
 const SYSTEM_PROMPT = `Eres el asistente virtual de Alpha Herramientas (alphaherramientas.cl), una tienda chilena online de herramientas profesionales. Tu objetivo principal es llevar al cliente a la web para que compre.
@@ -389,15 +623,15 @@ SOBRE LA TIENDA:
 - Mercado Libre: https://www.mercadolibre.cl/tienda/alpha-herramientas (mismos productos pero con sobrecargo de la plataforma)
 
 ENVÍOS:
-- Despacho de lunes a sábado a las 12:00 hrs. NO hay despachos los domingos.
-- Santiago (mismo día): compra antes de las 12:00 y recibe entre las 15:00 y 21:00 hrs vía Welivery. Solo días hábiles (lunes a sábado).
+- Despacho de lunes a sábado a las {HORA_CORTE} hrs. NO hay despachos los domingos.
+- Santiago (mismo día): compra antes de las {HORA_CORTE} y recibe entre las 15:00 y 21:00 hrs vía Welivery. Solo días hábiles (lunes a sábado).
 - Regiones: entrega en 24 a 48 hrs. Zonas extremas: hasta 72 hrs.
 - Courier: Starken y Blue Express Copec.
 - No hacen envíos fuera de Chile.
-- Si el cliente pregunta por envío un domingo: aclarar que el próximo despacho es el lunes a las 12:00 hrs.
+- Si el cliente pregunta por envío un domingo: aclarar que el próximo despacho es el lunes a las {HORA_CORTE} hrs.
 
 PAGOS:
-- Mercado Pago: hasta 6 cuotas precio contado (sin interés).
+- Mercado Pago: hasta 6 cuotas precio contado (sin interés). No hay otras opciones de cuotas ni financiamiento, salvo que una CAMPAÑA VIGENTE lo indique para sus productos.
 - Transferencia bancaria.
 - Tarjeta de crédito/débito.
 
@@ -421,6 +655,7 @@ REPUESTOS:
 - NUNCA prometas disponibilidad de repuestos.
 
 OFERTAS (si preguntan por ofertas, promociones, descuentos o precios rebajados):
+- Si hay una campaña vigente relacionada (ver CAMPAÑAS VIGENTES), infórmala primero.
 - Comparte: https://alphaherramientas.cl/ofertas
 - Y agrega: también tenemos ofertas que incluyen regalos en https://alphaherramientas.cl/exlusivos/ofertas-con-regalos (usar esta URL EXACTA, así escrita)
 - NUNCA inventes promociones ni descuentos.
@@ -464,13 +699,13 @@ REGLAS ESTRICTAS:
 5. NO hagas muchas preguntas. Responde directo.
 6. NO generes conversación innecesaria.
 7. Usa emojis con moderación (🔧📦📍📧).
-8. Siempre empieza con "Buenas!" o "¡Hola!".
+8. Siempre empieza con "Buenas!" o "¡Hola!". Habla como una tienda chilena: trata al cliente de "tú" (puedes, tienes, quieres). NUNCA uses voseo ni modismos argentinos (vos, podés, tenés, querés, fijate, che, dale).
 9. Corrige errores de escritura del cliente: tornillador→atornillador, inglatadora→ingleteadora.
 10. Si el producto está agotado, sugiere alternativas o que revise la web.
 11. Si no sabes el nombre técnico de algo que describe el cliente, intenta identificarlo y dar el link de búsqueda.
 12. Si no pudiste resolver la consulta del cliente (consulta técnica compleja, garantías, reclamos, situaciones especiales), agrega ##ESCALAR## al final de tu respuesta. Si la consulta fue resuelta, NO lo incluyas.
 13. NUNCA inventes productos, enlaces, categorías, promociones, descuentos ni especificaciones técnicas. Usa SOLO la información del catálogo proporcionado y los enlaces oficiales de este prompt o el buscador (search?q=).
-14. Tiempos de entrega: promete SOLO los publicados (mismo día en Santiago comprando antes de las 12:00, 24-48 hrs regiones, hasta 72 hrs zonas extremas). Nunca otros plazos ni condiciones especiales.
+14. Tiempos de entrega: promete SOLO los publicados (mismo día en Santiago comprando antes de las {HORA_CORTE}, 24-48 hrs regiones, hasta 72 hrs zonas extremas) o los que indique la INFORMACIÓN DE LA PLANILLA DE LA TIENDA. Nunca otros plazos ni condiciones especiales.
 15. Revisa el historial antes de responder: no repitas preguntas que el cliente ya respondió, no envíes la misma respuesta dos veces, y si el cliente cambia de tema sigue el tema nuevo.
 16. Si después de 4 o 5 intercambios la conversación no avanza o no logras resolver la consulta, agrega ##ESCALAR## al final de tu respuesta.
 
@@ -486,10 +721,10 @@ Ubicación:
 "Buenas! 📍 Somos tienda online, no contamos con local físico. Puedes ver todo aquí 👉 https://alphaherramientas.cl/"
 
 Envíos (Santiago):
-"Buenas! 📦 Si compras antes de las 12:00 recibes HOY entre las 15:00 y 21:00 hrs 🚚 Compra aquí 👉 https://alphaherramientas.cl/"
+"Buenas! 📦 Si compras antes de las {HORA_CORTE} recibes HOY entre las 15:00 y 21:00 hrs 🚚 Compra aquí 👉 https://alphaherramientas.cl/"
 
 Envíos (regiones):
-"Buenas! 📦 Enviamos a todo Chile. Despacho diario a las 12:00 hrs, entrega en 24 a 48 hrs vía Starken o Blue Express. Compra aquí 👉 https://alphaherramientas.cl/"
+"Buenas! 📦 Enviamos a todo Chile. Despacho diario a las {HORA_CORTE} hrs, entrega en 24 a 48 hrs vía Starken o Blue Express. Compra aquí 👉 https://alphaherramientas.cl/"
 
 Cotización:
 "Buenas! 📧 Para cotizar envíanos listado de productos, nombre/razón social, RUT, dirección, correo y teléfono a 👉 ventas@alphaherramientas.cl"
@@ -506,11 +741,29 @@ Producto agotado:
 Cómo comprar:
 "Buenas! 🔧 Puedes comprar directamente en nuestra web 👉 https://alphaherramientas.cl/ También puedes pagar con transferencia 👍"
 
-Envío a región específica:
+Envío a región específica (si hay una campaña vigente de envío, usa sus condiciones en vez de los $100.000):
 "Buenas! 📦 El costo de envío se muestra al agregar el producto al carrito y seleccionar tu dirección. Envíos en Santiago gratis sobre $100.000 👉 https://alphaherramientas.cl/"
 
 PRODUCTOS RELEVANTES DEL CATÁLOGO:
-{CATALOG}`;
+{CATALOG}
+
+INFORMACIÓN DE LA PLANILLA DE LA TIENDA (la actualiza el equipo; REEMPLAZA a cualquier dato fijo o plantilla de arriba sobre el mismo tema: envíos, plazos, horarios, montos, promociones. Una campaña solo los reemplaza para lo que ella cubre):
+
+CAMPAÑAS VIGENTES (junto a los links de ofertas, son las ÚNICAS promociones que existen):
+{CAMPAIGNS}
+- Si la consulta del cliente se relaciona con una campaña vigente (marca, producto, envío), menciónala en una frase corta y comparte su link si tiene.
+- Usa el alcance, montos, condiciones y fechas EXACTOS de la campaña (ej: si dice "a todo Chile", no digas "en Santiago"). No las extiendas, no las combines ni agregues beneficios.
+- Cada campaña aplica SOLO a los productos, colección, marca, zona o monto que nombra. Para todo lo demás rigen las condiciones normales de arriba (ej: si una colección tiene más cuotas o envío gratis, el resto de los productos sigue con las cuotas y el envío normales).
+- Si el cliente pregunta por un producto o marca que la campaña no nombra, responde solo con las condiciones normales. NUNCA digas que un producto o marca es parte de una campaña si la campaña no lo dice.
+- Si al cliente le aplica más de una campaña, usa la que más le conviene, sin sumar sus beneficios (ej: si su producto tiene envío gratis sin monto mínimo, no le exijas el monto mínimo de otra campaña de envío).
+
+CAMPAÑAS TERMINADAS (NUNCA las ofrezcas ni las menciones por iniciativa propia):
+{ENDED_CAMPAIGNS}
+- Solo si el cliente pregunta por una de estas: dile que ya terminó y en qué fecha, y comparte https://alphaherramientas.cl/ofertas para ver las ofertas actuales.
+
+INFORMACIÓN ACTUALIZADA:
+{GENERAL_INFO}
+- Si un dato o aviso de aquí se relaciona con la consulta (ej: demoras en envíos, horarios), inclúyelo SIEMPRE en tu respuesta.`;
 
 // ============================================================
 // HISTORIAL DE CONVERSACIÓN (últimos 20 mensajes, expira en 7 días)
@@ -601,16 +854,20 @@ function formatOrders(orders) {
     const tracking = order.tracking_url || (trackingMatch ? trackingMatch[0] : null);
     const customer = order.customer?.fullname;
 
-    // Hora de completado en Chile (UTC-4)
+    // Hora de completado en Chile (America/Santiago: UTC-3 en horario de verano, UTC-4 en invierno)
     let completedStr = null;
     let sameDayHint = null;
     if (order.completed_at) {
       const utc = new Date(order.completed_at.replace(" UTC", "Z"));
-      const clHour = utc.getUTCHours() - 4; // UTC-4 Chile
-      const clMin = utc.getUTCMinutes();
-      const day = utc.toLocaleDateString("es-CL", { timeZone: "America/Santiago", day: "2-digit", month: "2-digit", year: "numeric" });
+      const tz = { timeZone: "America/Santiago" };
+      const [clHour, clMin] = utc.toLocaleTimeString("en-GB", { ...tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).split(":").map(Number);
+      const day = utc.toLocaleDateString("es-CL", { ...tz, day: "2-digit", month: "2-digit", year: "numeric" });
       completedStr = `Pagado el ${day} a las ${String(clHour).padStart(2,"0")}:${String(clMin).padStart(2,"0")} hrs`;
-      if (clHour < 12) sameDayHint = "Compra antes de las 12:00 — si eres de Santiago debería llegar hoy entre 15:00 y 21:00 hrs 🚚";
+      // "Llega hoy" solo si se pagó hoy, en día de despacho (lunes a sábado) y antes de la hora de corte
+      const paidToday = utc.toLocaleDateString("en-CA", tz) === todayChile();
+      const isSunday = utc.toLocaleDateString("en-US", { ...tz, weekday: "short" }) === "Sun";
+      const horaCorte = getHoraCorte();
+      if (paidToday && !isSunday && clHour * 60 + clMin < horaCorte.minutos) sameDayHint = `Compra antes de las ${horaCorte.texto} — si eres de Santiago debería llegar hoy entre 15:00 y 21:00 hrs 🚚`;
     }
 
     let lines = [`📦 Pedido #${order.id} — ${status}`];
@@ -693,12 +950,20 @@ async function askClaude(userMessage, contactId) {
   const esDomingo = now.getDay() === 0;
   const esFeriado = FERIADOS_CL.has(fechaHoy);
   const sinDespacho = esDomingo || esFeriado;
-  const antesDeLas12 = hourCL < 12;
+  const sheet = await fetchSheetData();
+  const horaCorte = getHoraCorte();
+  const antesDelCorte = hourCL * 60 + now.getMinutes() < horaCorte.minutos;
+  const campaignsText = formatCampaignsForContext(sheet.campaigns, fechaHoy);
+  // Reemplazo con función: así un "$" escrito en la planilla no se interpreta como patrón de replace
   let systemPrompt = SYSTEM_PROMPT.replace("{CATALOG}", catalog).replace(
     "{CATEGORIES}",
     categoriesText || "(ninguna calza con esta consulta — usa el buscador)"
-  );
-  systemPrompt += `\n\nCONTEXTO ACTUAL: Hoy es ${dayName} ${fechaHoy}. Hora en Chile: ${hourCL}:${String(now.getMinutes()).padStart(2,"0")} hrs. ${sinDespacho ? `HOY NO HAY DESPACHOS (${esFeriado ? "feriado" : "domingo"}). Los pedidos de Santiago de hoy llegarán al día hábil siguiente.` : antesDeLas12 ? "Aún es antes de las 12:00 hrs: si compran ahora en Santiago, reciben hoy entre 15:00 y 21:00 hrs." : "Ya pasaron las 12:00 hrs: los pedidos de Santiago de hoy llegarán mañana."}`;
+  )
+    .replace("{CAMPAIGNS}", () => campaignsText.active)
+    .replace("{ENDED_CAMPAIGNS}", () => campaignsText.ended)
+    .replace("{GENERAL_INFO}", () => formatGeneralInfoForContext(sheet.general))
+    .replaceAll("{HORA_CORTE}", horaCorte.texto);
+  systemPrompt += `\n\nCONTEXTO ACTUAL: Hoy es ${dayName} ${fechaHoy}. Hora en Chile: ${hourCL}:${String(now.getMinutes()).padStart(2,"0")} hrs. ${sinDespacho ? `HOY NO HAY DESPACHOS (${esFeriado ? "feriado" : "domingo"}). Los pedidos de Santiago de hoy llegarán al día hábil siguiente.` : antesDelCorte ? `Aún es antes de las ${horaCorte.texto} hrs: si compran ahora en Santiago, reciben hoy entre 15:00 y 21:00 hrs.` : `Ya pasaron las ${horaCorte.texto} hrs: los pedidos de Santiago de hoy llegarán mañana.`}`;
 
   if (!firstMsg) {
     systemPrompt += "\n\nIMPORTANTE: Este NO es el primer mensaje del cliente. NO saludes con 'Buenas!' ni '¡Hola!'. Ve directo a la respuesta.";
@@ -747,7 +1012,7 @@ async function askClaude(userMessage, contactId) {
 // ============================================================
 async function sendWhatsApp(to, text) {
   try {
-    await fetch(
+    const res = await fetch(
       `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_ID}/messages`,
       {
         method: "POST",
@@ -763,6 +1028,8 @@ async function sendWhatsApp(to, text) {
         }),
       }
     );
+    // Meta rechazó el envío (token vencido, número bloqueado, etc.): dejar el motivo en el log
+    if (!res.ok) console.error(`[WSP] Meta rechazó el envío a ${to}:`, (await res.text()).slice(0, 300));
   } catch (err) {
     console.error("[WSP] Error enviando:", err.message);
   }
@@ -818,9 +1085,17 @@ app.post("/webhook", async (req, res) => {
     // ─── WHATSAPP ───
     if (body.object === "whatsapp_business_account") {
       const changes = body.entry?.[0]?.changes?.[0]?.value;
+      // Número de la tienda al que llegó el aviso (Meta avisa de más de un número a este webhook)
+      const storeNumber = changes?.metadata?.display_phone_number;
 
       // Detectar mensajes enviados por el negocio (echo/status)
-      if (changes?.statuses) return;
+      if (changes?.statuses) {
+        // Meta aceptó el envío pero después no lo pudo entregar: dejar el motivo en el log
+        for (const s of changes.statuses) {
+          if (s.status === "failed") console.error(`[WSP-FALLO] No se entregó a ${s.recipient_id} (desde ${storeNumber}):`, JSON.stringify(s.errors || []).slice(0, 300));
+        }
+        return;
+      }
 
       if (!changes?.messages) return;
 
@@ -831,7 +1106,7 @@ app.post("/webhook", async (req, res) => {
       const text = msg.text.body;
 
       if (isBotLoop(from)) return;
-      console.log(`[WSP] ${from}: ${text}`);
+      console.log(`[WSP] ${from} (al ${storeNumber}): ${text}`);
 
       scheduleReply(from, text, async (combined) => {
         // Takeover humano: silencio durante la pausa; tras vencer, solo tema nuevo
@@ -971,6 +1246,23 @@ app.get("/stats", (req, res) => {
   });
 });
 
+// Muestra lo que el bot está leyendo de la planilla. ?refrescar=1 fuerza una lectura nueva.
+app.get("/campanas", async (req, res) => {
+  if (req.query.refrescar) sheetCheckedAt = 0;
+  const data = await fetchSheetData();
+  const today = todayChile();
+  res.json({
+    planilla_configurada: Boolean(CAMPAIGNS_SHEET_ID),
+    hoy: today,
+    revisada: sheetCheckedAt ? new Date(sheetCheckedAt).toISOString() : null,
+    error: data.error,
+    hora_corte: getHoraCorte().texto,
+    campanas: data.campaigns.map((c) => ({ ...c, estado: campaignStatus(c, today) })),
+    datos_generales: data.general,
+    filas_omitidas: data.skipped,
+  });
+});
+
 // ============================================================
 // INICIAR
 // ============================================================
@@ -988,4 +1280,5 @@ app.listen(PORT, () => {
   fetchProducts().then(() => {
     console.log("[INIT] Catálogo cargado, bot listo");
   });
+  fetchSheetData();
 });
