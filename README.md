@@ -2,7 +2,7 @@
 
 Bot de atención al cliente con IA para [Alpha Herramientas](https://alphaherramientas.cl).
 
-Responde automáticamente en **WhatsApp, Instagram, Facebook Messenger y TikTok** usando Claude Haiku 4.5, con precios y stock en tiempo real desde Jumpseller.
+Responde automáticamente en **WhatsApp, Instagram, Facebook Messenger y TikTok** usando Claude Haiku 5.5, con precios y stock en tiempo real desde Jumpseller.
 
 ## Arquitectura
 
@@ -68,6 +68,6 @@ Ver `.env.example` para la lista completa.
 |-----------|-----------|
 | Railway Hobby | $5 |
 | ManyChat Pro (TikTok) | $25 |
-| Claude Haiku 4.5 (~10K consultas) | ~$15 |
+| Claude Haiku 5.5 (~10K consultas) | ~$13 |
 | WhatsApp/IG/FB API | $0 |
-| **Total** | **~$45** |
+| **Total** | **~$43** |

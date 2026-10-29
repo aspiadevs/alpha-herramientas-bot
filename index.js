@@ -30,18 +30,23 @@ const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 // ============================================================
 let monthlySpend = 0;
 let currentMonth = new Date().getMonth();
-const HAIKU_INPUT_COST = 1 / 1_000_000;
-const HAIKU_OUTPUT_COST = 5 / 1_000_000;
+// Haiku 5.5 (prompts de hasta 100K tokens; los nuestros son mucho más cortos)
+const HAIKU_INPUT_COST = 0.1 / 1_000_000;
+const HAIKU_OUTPUT_COST = 0.5 / 1_000_000;
 
-function trackSpend(inputTokens, outputTokens) {
+function trackSpend(usage) {
   const now = new Date();
   if (now.getMonth() !== currentMonth) {
     monthlySpend = 0;
     currentMonth = now.getMonth();
     console.log("[GASTO] Nuevo mes, contador reseteado");
   }
+  // El prompt cacheado no viene en input_tokens: escribirlo cuesta 1.25x y leerlo 0.1x
+  const inputTokens = usage.input_tokens
+    + (usage.cache_creation_input_tokens || 0) * 1.25
+    + (usage.cache_read_input_tokens || 0) * 0.1;
   monthlySpend +=
-    inputTokens * HAIKU_INPUT_COST + outputTokens * HAIKU_OUTPUT_COST;
+    inputTokens * HAIKU_INPUT_COST + usage.output_tokens * HAIKU_OUTPUT_COST;
 }
 
 function isBudgetExceeded() {
@@ -132,23 +137,29 @@ async function isNewTopic(contactId, newMessage) {
   if (isBudgetExceeded()) return false;
   try {
     const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 5,
+      model: "claude-haiku-5-5",
+      max_tokens: 1024, // deja espacio para que piense antes de la palabra
+      output_config: { effort: "low" },
       messages: [{
         role: "user",
         content: `Un asesor humano está atendiendo a este cliente de una tienda de herramientas por el siguiente tema pendiente:\n\n${entry.topic}\n\nNuevo mensaje del cliente: "${newMessage}"\n\n¿El nuevo mensaje trata del MISMO tema pendiente o de un tema NUEVO distinto? Responde con una sola palabra: MISMO o NUEVO.`,
       }],
     });
     if (response.usage) {
-      trackSpend(response.usage.input_tokens, response.usage.output_tokens);
+      trackSpend(response.usage);
     }
-    const verdict = response.content[0].text.trim().toUpperCase();
+    const verdict = replyText(response).toUpperCase();
     console.log(`[TEMA] ${contactId}: ${verdict}`);
     return verdict.includes("NUEVO");
   } catch (err) {
     console.error("[TEMA] Error:", err.message);
     return false; // ante la duda, que responda el humano
   }
+}
+
+// Haiku 5.5 puede devolver bloques de "thinking" antes de la respuesta: tomar solo el texto
+function replyText(response) {
+  return response.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim();
 }
 
 function isFirstMessage(contactId) {
@@ -882,7 +893,7 @@ function formatOrders(orders) {
 }
 
 // ============================================================
-// LLAMAR A CLAUDE HAIKU 4.5
+// LLAMAR A CLAUDE HAIKU 5.5
 // ============================================================
 async function askClaude(userMessage, contactId) {
   if (isBudgetExceeded()) {
@@ -971,8 +982,9 @@ async function askClaude(userMessage, contactId) {
 
   try {
     const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 300,
+      model: "claude-haiku-5-5",
+      max_tokens: 4000, // el razonamiento interno también cuenta acá; el largo de la respuesta lo fija el prompt
+      output_config: { effort: "low" },
       system: [
         {
           type: "text",
@@ -984,13 +996,15 @@ async function askClaude(userMessage, contactId) {
     });
 
     if (response.usage) {
-      trackSpend(response.usage.input_tokens, response.usage.output_tokens);
+      trackSpend(response.usage);
       console.log(
-        `[GASTO] $${monthlySpend.toFixed(4)} / $${MONTHLY_AI_BUDGET} | In: ${response.usage.input_tokens} Out: ${response.usage.output_tokens}`
+        `[GASTO] $${monthlySpend.toFixed(4)} / $${MONTHLY_AI_BUDGET} | In: ${response.usage.input_tokens} Caché: ${response.usage.cache_creation_input_tokens || 0}+${response.usage.cache_read_input_tokens || 0} Out: ${response.usage.output_tokens}`
       );
     }
 
-    let reply = response.content[0].text;
+    let reply = replyText(response);
+    // Sin texto: el modelo declinó (stop_reason "refusal") o se quedó sin espacio
+    if (!reply) throw new Error(`respuesta sin texto (stop_reason: ${response.stop_reason})`);
     const necesitaEscalar = reply.includes("##ESCALAR##");
     reply = reply.replace("##ESCALAR##", "").trim();
 
@@ -1272,7 +1286,7 @@ app.listen(PORT, () => {
 ║  🔧 Alpha Herramientas Bot             ║
 ║  Puerto: ${PORT}                            ║
 ║  Canales: WSP + IG + FB + TikTok       ║
-║  IA: Claude Haiku 4.5                  ║
+║  IA: Claude Haiku 5.5                  ║
 ║  Budget: $${MONTHLY_AI_BUDGET}/mes                      ║
 ╚══════════════════════════════════════════╝
   `);
