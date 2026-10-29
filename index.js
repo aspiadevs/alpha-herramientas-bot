@@ -591,7 +591,7 @@ function formatCampaignsForContext(campaigns, today) {
   const active = campaigns
     .filter((c) => campaignStatus(c, today) === "vigente")
     .map((c) => {
-      let line = `- ${c.nombre}${c.termino ? ` (válida hasta el ${formatDateCL(c.termino)} inclusive)` : ""} | ${c.mensaje}`;
+      let line = `- ${c.nombre}${c.termino ? ` (válida hasta el ${formatDateCL(c.termino)} inclusive)` : ""} | Qué decir: ${c.mensaje}`;
       if (c.condiciones) line += ` | Condiciones: ${c.condiciones}`;
       if (c.link) line += ` | Link: ${c.link}`;
       return line;
@@ -655,7 +655,7 @@ REPUESTOS:
 - NUNCA prometas disponibilidad de repuestos.
 
 OFERTAS (si preguntan por ofertas, promociones, descuentos o precios rebajados):
-- Si hay una campaña vigente relacionada (ver CAMPAÑAS VIGENTES), infórmala primero.
+- Si preguntan en general (ej: "¿tienen promociones?"), menciona primero TODAS las campañas vigentes (ver CAMPAÑAS VIGENTES), una frase con su beneficio principal para cada una. Si preguntan por algo puntual, informa primero la campaña relacionada.
 - Comparte: https://alphaherramientas.cl/ofertas
 - Y agrega: también tenemos ofertas que incluyen regalos en https://alphaherramientas.cl/exlusivos/ofertas-con-regalos (usar esta URL EXACTA, así escrita)
 - NUNCA inventes promociones ni descuentos.
@@ -751,7 +751,7 @@ INFORMACIÓN DE LA PLANILLA DE LA TIENDA (la actualiza el equipo; REEMPLAZA a cu
 
 CAMPAÑAS VIGENTES (junto a los links de ofertas, son las ÚNICAS promociones que existen):
 {CAMPAIGNS}
-- Si la consulta del cliente se relaciona con una campaña vigente (marca, producto, envío), menciónala en una frase corta y comparte su link si tiene.
+- Si la consulta del cliente se relaciona con una campaña vigente (marca, producto, envío), transmite lo que indica su "Qué decir" sin omitir ninguno de sus beneficios (envío, cuotas, link de pago, regalos), aunque la respuesta quede algo más larga, y comparte su link si tiene.
 - Usa el alcance, montos, condiciones y fechas EXACTOS de la campaña (ej: si dice "a todo Chile", no digas "en Santiago"). No las extiendas, no las combines ni agregues beneficios.
 - Cada campaña aplica SOLO a los productos, colección, marca, zona o monto que nombra. Para todo lo demás rigen las condiciones normales de arriba (ej: si una colección tiene más cuotas o envío gratis, el resto de los productos sigue con las cuotas y el envío normales).
 - Si el cliente pregunta por un producto o marca que la campaña no nombra, responde solo con las condiciones normales. NUNCA digas que un producto o marca es parte de una campaña si la campaña no lo dice.
