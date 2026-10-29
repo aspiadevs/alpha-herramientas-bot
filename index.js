@@ -1085,12 +1085,14 @@ app.post("/webhook", async (req, res) => {
     // ─── WHATSAPP ───
     if (body.object === "whatsapp_business_account") {
       const changes = body.entry?.[0]?.changes?.[0]?.value;
+      // Número de la tienda al que llegó el aviso (Meta avisa de más de un número a este webhook)
+      const storeNumber = changes?.metadata?.display_phone_number;
 
       // Detectar mensajes enviados por el negocio (echo/status)
       if (changes?.statuses) {
         // Meta aceptó el envío pero después no lo pudo entregar: dejar el motivo en el log
         for (const s of changes.statuses) {
-          if (s.status === "failed") console.error(`[WSP-FALLO] No se entregó a ${s.recipient_id}:`, JSON.stringify(s.errors || []).slice(0, 300));
+          if (s.status === "failed") console.error(`[WSP-FALLO] No se entregó a ${s.recipient_id} (desde ${storeNumber}):`, JSON.stringify(s.errors || []).slice(0, 300));
         }
         return;
       }
@@ -1104,7 +1106,7 @@ app.post("/webhook", async (req, res) => {
       const text = msg.text.body;
 
       if (isBotLoop(from)) return;
-      console.log(`[WSP] ${from}: ${text}`);
+      console.log(`[WSP] ${from} (al ${storeNumber}): ${text}`);
 
       scheduleReply(from, text, async (combined) => {
         // Takeover humano: silencio durante la pausa; tras vencer, solo tema nuevo
