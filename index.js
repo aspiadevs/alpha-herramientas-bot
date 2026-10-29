@@ -751,7 +751,7 @@ INFORMACIÓN DE LA PLANILLA DE LA TIENDA (la actualiza el equipo; REEMPLAZA a cu
 
 CAMPAÑAS VIGENTES (junto a los links de ofertas, son las ÚNICAS promociones que existen):
 {CAMPAIGNS}
-- Si la consulta del cliente se relaciona con una campaña vigente (marca, producto, envío), transmite lo que indica su "Qué decir" sin omitir ninguno de sus beneficios (envío, cuotas, link de pago, regalos), aunque la respuesta quede algo más larga, y comparte su link si tiene.
+- Si la consulta del cliente se relaciona con una campaña vigente (marca, producto, envío), transmite lo que indica su "Qué decir" sin omitir ninguno de sus beneficios (envío, cuotas, link de pago, regalos) y agrega lo importante de sus "Condiciones" (a qué productos aplica, monto mínimo y cómo se calcula; y SIEMPRE la fecha de término o "hasta agotar stock" si la campaña lo indica), aunque la respuesta quede algo más larga, y comparte su link si tiene. El paso a paso de un pago especial (link, captura, datos) dalo cuando el cliente quiera usar esa opción.
 - Usa el alcance, montos, condiciones y fechas EXACTOS de la campaña (ej: si dice "a todo Chile", no digas "en Santiago"). No las extiendas, no las combines ni agregues beneficios.
 - Cada campaña aplica SOLO a los productos, colección, marca, zona o monto que nombra. Para todo lo demás rigen las condiciones normales de arriba (ej: si una colección tiene más cuotas o envío gratis, el resto de los productos sigue con las cuotas y el envío normales).
 - Si el cliente pregunta por un producto o marca que la campaña no nombra, responde solo con las condiciones normales. NUNCA digas que un producto o marca es parte de una campaña si la campaña no lo dice.
