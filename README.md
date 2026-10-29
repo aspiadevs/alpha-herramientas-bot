@@ -50,16 +50,6 @@ Reglas:
 - Filas con fechas inválidas se omiten y aparecen en `/campanas` como `filas_omitidas`.
 - Cada celda se lee hasta 1.000 caracteres; el resto se corta.
 
-## Pausa cuando atiende un humano (WhatsApp)
-
-El número está a la vez en la API y en la app WhatsApp Business, desde donde responde el equipo. El bot se calla 4 días con un cliente cuando:
-- Meta avisa de un mensaje enviado desde la app (aviso de estado "sent" de un mensaje que no mandó el bot, o `smb_message_echoes` si está activado).
-- El cliente responde citando un mensaje del negocio que no mandó el bot.
-- El cliente manda una imagen, audio, video o documento (ej: captura de pago).
-- El cliente pide un humano (humano, persona, vendedor, asesor…) o hay un posible loop entre bots.
-
-Cada señal nueva reinicia los 4 días. Al vencer, si el cliente sigue con el mismo tema la pausa se renueva; con un tema nuevo vuelve a responder el bot. Las pausas y los IDs de mensajes del bot viven en memoria: se pierden al reiniciar.
-
 ## Variables de Entorno
 
 Ver `.env.example` para la lista completa.
