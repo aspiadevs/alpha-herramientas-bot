@@ -50,7 +50,7 @@ function isBudgetExceeded() {
 
 // ============================================================
 // DETECCIÓN DE LOOP BOT-VS-BOT
-// Si un contacto envía más de 5 mensajes en 30 segundos → pausar 48hrs
+// Si un contacto envía más de 5 mensajes en 30 segundos → pausar (takeover humano)
 // ============================================================
 const messageRateTracker = new Map(); // contactId → [timestamps]
 const RATE_WINDOW_MS = 30 * 1000;
@@ -68,32 +68,65 @@ function isBotLoop(contactId) {
 
   if (recent.length >= RATE_MAX_MESSAGES) {
     messageRateTracker.delete(contactId);
-    console.log(`[LOOP] Bot-loop detectado en ${contactId}, pausando 48hrs`);
-    markAsHuman(contactId);
+    console.log(`[LOOP] Bot-loop detectado en ${contactId}`);
+    markAsHuman(contactId, "posible loop entre bots");
     return true;
   }
   return false;
 }
 
 // ============================================================
-// CONTROL DE TAKEOVER HUMANO (48 horas de pausa)
-// Durante la pausa el bot guarda silencio total. Al vencer la pausa,
-// si el cliente sigue con el MISMO tema que atendía el asesor, la
-// pausa se renueva otras 48hrs; solo con un tema nuevo actúa el bot.
+// CONTROL DE TAKEOVER HUMANO (4 días de pausa)
+// Durante la pausa el bot guarda silencio total. Cada señal de que un
+// asesor atiende (respuesta desde la app WhatsApp Business, cliente que
+// cita un mensaje del asesor o manda foto/audio/documento, o pide un
+// humano) reinicia los 4 días. Al vencer la pausa, si el cliente sigue
+// con el MISMO tema, la pausa se renueva; solo con un tema nuevo actúa el bot.
 // ============================================================
 const humanTakeover = new Map(); // contactId → { pausedAt, topic }
 const greeted = new Set();
-const HUMAN_PAUSE_MS = 48 * 60 * 60 * 1000; // 48 horas
+const HUMAN_PAUSE_DAYS = 4;
+const HUMAN_PAUSE_MS = HUMAN_PAUSE_DAYS * 24 * 60 * 60 * 1000;
 
-function markAsHuman(contactId) {
+function markAsHuman(contactId, reason = "pidió un humano") {
   // Snapshot del tema escalado: últimos mensajes del historial al momento de pausar
   const topic = getHistory(contactId)
     .slice(-6)
     .map(m => `${m.role === "user" ? "Cliente" : "Bot"}: ${m.content}`)
     .join("\n");
   humanTakeover.set(contactId, { pausedAt: Date.now(), topic });
-  console.log(`[HUMANO] Contacto ${contactId} pausado por 48hrs (${humanTakeover.size} total)`);
+  console.log(`[HUMANO] Contacto ${contactId} pausado por ${HUMAN_PAUSE_DAYS} días — ${reason} (${humanTakeover.size} total)`);
 }
+
+// Mensajes de WhatsApp enviados por el bot (IDs de Meta). Un mensaje del negocio que no esté
+// aquí lo escribió el asesor desde la app (el número está en la API y en WhatsApp Business a la vez).
+// Se pierde al reiniciar: un mensaje del bot anterior al reinicio puede confundirse con uno del asesor.
+const botSentIds = new Set();
+const BOT_SENT_MAX = 5000;
+const STATUS_CHECK_DELAY_MS = 5000; // el aviso de Meta puede llegar antes de que el bot registre su propio envío
+const serverStartedAt = Date.now();
+
+function rememberBotMessage(id) {
+  botSentIds.add(id);
+  if (botSentIds.size > BOT_SENT_MAX) botSentIds.delete(botSentIds.values().next().value);
+}
+
+// Aviso de estado de Meta: si es de un mensaje que no mandó el bot, lo mandó el asesor desde la app
+function checkStatusFromAdvisor(status) {
+  // Anterior al arranque: no se puede saber de quién era (Meta informa la hora en segundos)
+  if (Number(status.timestamp) < Math.floor(serverStartedAt / 1000)) return;
+  setTimeout(() => {
+    if (botSentIds.has(status.id)) return;
+    if (status.status !== "sent") {
+      console.log(`[WSP-ESTADO] "${status.status}" de un mensaje que no mandó el bot → ${status.recipient_id}`);
+      return;
+    }
+    markAsHuman(status.recipient_id, "el asesor le escribió desde la app");
+  }, STATUS_CHECK_DELAY_MS);
+}
+
+// Tipos de mensaje que el bot no puede leer: los atiende el asesor
+const ADVISOR_MEDIA = { image: "una imagen", audio: "un audio", video: "un video", document: "un documento" };
 
 async function shouldStaySilent(contactId, message) {
   const entry = humanTakeover.get(contactId);
@@ -106,7 +139,7 @@ async function shouldStaySilent(contactId, message) {
   if (!entry.topic) {
     humanTakeover.delete(contactId);
     greeted.delete(contactId); // Para que vuelva a saludar
-    console.log(`[HUMANO] Contacto ${contactId} reactivado (pasaron 48hrs, sin tema registrado)`);
+    console.log(`[HUMANO] Contacto ${contactId} reactivado (pasaron ${HUMAN_PAUSE_DAYS} días, sin tema registrado)`);
     return false;
   }
 
@@ -119,9 +152,9 @@ async function shouldStaySilent(contactId, message) {
     return false;
   }
 
-  // Mismo tema: renovar la pausa otras 48hrs y seguir en silencio
+  // Mismo tema: renovar la pausa y seguir en silencio
   entry.pausedAt = Date.now();
-  console.log(`[HUMANO] Contacto ${contactId} sigue con el mismo tema — pausa renovada 48hrs`);
+  console.log(`[HUMANO] Contacto ${contactId} sigue con el mismo tema — pausa renovada ${HUMAN_PAUSE_DAYS} días`);
   return true;
 }
 
@@ -908,9 +941,10 @@ async function askClaude(userMessage, contactId) {
   }
 
   // Detectar si pide hablar con humano
-  const humanKeywords = ["persona", "humano", "vendedor", "asesor", "hablar con alguien", "agente", "ejecutivo", "atención humana"];
-  const lowerMsg = userMessage.toLowerCase();
-  if (humanKeywords.some(k => lowerMsg.includes(k))) {
+  // Palabras completas (con plural): "personal" o "personalizado" no cuentan como pedir un humano
+  const humanKeywords = ["persona", "humano", "vendedor", "asesor", "hablar con alguien", "agente", "ejecutivo", "atencion humana"];
+  const normalizedMsg = normalizeText(userMessage);
+  if (humanKeywords.some(k => new RegExp(`\\b${k}(e?s)?\\b`).test(normalizedMsg))) {
     if (contactId) {
       // Registrar el mensaje antes de pausar: suele traer el motivo de la escalada
       addToHistory(contactId, "user", userMessage);
@@ -1012,7 +1046,7 @@ async function askClaude(userMessage, contactId) {
 // ============================================================
 async function sendWhatsApp(to, text) {
   try {
-    await fetch(
+    const res = await fetch(
       `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_ID}/messages`,
       {
         method: "POST",
@@ -1028,6 +1062,11 @@ async function sendWhatsApp(to, text) {
         }),
       }
     );
+    // Guardar el ID para distinguir los mensajes del bot de los que escribe el asesor desde la app
+    const data = await res.json().catch(() => ({}));
+    const id = data.messages?.[0]?.id;
+    if (id) rememberBotMessage(id);
+    else console.error("[WSP] Error enviando:", JSON.stringify(data.error || data).slice(0, 200));
   } catch (err) {
     console.error("[WSP] Error enviando:", err.message);
   }
@@ -1082,17 +1121,47 @@ app.post("/webhook", async (req, res) => {
 
     // ─── WHATSAPP ───
     if (body.object === "whatsapp_business_account") {
-      const changes = body.entry?.[0]?.changes?.[0]?.value;
+      const change = body.entry?.[0]?.changes?.[0];
+      const changes = change?.value;
 
-      // Detectar mensajes enviados por el negocio (echo/status)
-      if (changes?.statuses) return;
+      // Mensajes que el asesor manda desde la app WhatsApp Business (solo llegan si Meta tiene activado "smb_message_echoes")
+      if (changes?.message_echoes) {
+        for (const echo of changes.message_echoes) {
+          if (!botSentIds.has(echo.id)) markAsHuman(echo.to, "el asesor le escribió desde la app");
+        }
+        return;
+      }
 
-      if (!changes?.messages) return;
+      // Avisos de estado (enviado/entregado/leído): si son de un mensaje que no mandó el bot, lo mandó el asesor
+      if (changes?.statuses) {
+        changes.statuses.forEach(checkStatusFromAdvisor);
+        return;
+      }
+
+      if (!changes?.messages) {
+        console.log(`[WSP-EVENTO] Evento sin mensajes (campo "${change?.field}"): ${Object.keys(changes || {}).join(", ")}`);
+        return;
+      }
 
       const msg = changes.messages[0];
+      const from = msg.from;
+
+      // El cliente responde citando un mensaje del negocio que no mandó el bot → lo escribió el asesor
+      if (msg.context?.id && msg.context.from !== from && !botSentIds.has(msg.context.id)) {
+        markAsHuman(from, "citó un mensaje del asesor");
+      }
+
+      // Foto, audio, video o documento (ej: captura de pago): el bot no los lee, los atiende el asesor
+      if (ADVISOR_MEDIA[msg.type]) {
+        const caption = msg[msg.type]?.caption;
+        console.log(`[WSP] ${from}: [${msg.type}]${caption ? ` ${caption}` : ""}`);
+        addToHistory(from, "user", `[El cliente envió ${ADVISOR_MEDIA[msg.type]}]${caption ? ` ${caption}` : ""}`);
+        markAsHuman(from, `envió ${ADVISOR_MEDIA[msg.type]}`);
+        return;
+      }
+
       if (msg.type !== "text") return;
 
-      const from = msg.from;
       const text = msg.text.body;
 
       if (isBotLoop(from)) return;
