@@ -33,7 +33,6 @@ Todos los canales comparten la misma lógica de IA. El bot:
 - WEBHOOK_VERIFY_TOKEN — String random para verificar webhook de Meta
 - JUMPSELLER_LOGIN — Login key de la API de Jumpseller
 - JUMPSELLER_TOKEN — Auth token de Jumpseller (32 caracteres)
-- CAMPAIGNS_SHEET_ID — ID del Google Sheets con campañas y datos generales (opcional, ver README)
 - MONTHLY_AI_BUDGET — Límite de gasto mensual en USD para Claude (default: 15)
 
 ## Endpoints
