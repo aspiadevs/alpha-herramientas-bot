@@ -1012,7 +1012,7 @@ async function askClaude(userMessage, contactId) {
 // ============================================================
 async function sendWhatsApp(to, text) {
   try {
-    await fetch(
+    const res = await fetch(
       `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_ID}/messages`,
       {
         method: "POST",
@@ -1028,6 +1028,8 @@ async function sendWhatsApp(to, text) {
         }),
       }
     );
+    // Meta rechazó el envío (token vencido, número bloqueado, etc.): dejar el motivo en el log
+    if (!res.ok) console.error(`[WSP] Meta rechazó el envío a ${to}:`, (await res.text()).slice(0, 300));
   } catch (err) {
     console.error("[WSP] Error enviando:", err.message);
   }
@@ -1085,7 +1087,13 @@ app.post("/webhook", async (req, res) => {
       const changes = body.entry?.[0]?.changes?.[0]?.value;
 
       // Detectar mensajes enviados por el negocio (echo/status)
-      if (changes?.statuses) return;
+      if (changes?.statuses) {
+        // Meta aceptó el envío pero después no lo pudo entregar: dejar el motivo en el log
+        for (const s of changes.statuses) {
+          if (s.status === "failed") console.error(`[WSP-FALLO] No se entregó a ${s.recipient_id}:`, JSON.stringify(s.errors || []).slice(0, 300));
+        }
+        return;
+      }
 
       if (!changes?.messages) return;
 
