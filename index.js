@@ -239,29 +239,45 @@ async function fetchProducts() {
   return productCache;
 }
 
-function searchProducts(query, products) {
-  const terms = query
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
+// Palabras de la consulta que no describen un producto ("hola, ¿tienen stock de...?")
+const SEARCH_STOPWORDS = new Set([
+  "hola", "buenas", "buenos", "dias", "tardes", "gracias", "porfa", "favor",
+  "tienen", "tiene", "tienes", "hay", "esta", "estan", "queda", "quedan",
+  "cuanto", "cuanta", "vale", "valor", "sale", "cuesta", "precio", "precios",
+  "stock", "disponible", "disponibles", "disponibilidad",
+  "quiero", "necesito", "busco", "comprar", "venden", "vende",
+  "para", "con", "sin", "los", "las", "del", "una", "uno", "unos", "unas",
+  "que", "como", "donde", "cual", "cuales", "ese", "esa", "eso", "este",
+]);
+
+// fallback = false: sin coincidencias devuelve [] en vez de productos cualquiera
+function searchProducts(query, products, fallback = true) {
+  const normalize = (s) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const terms = normalize(query)
+    .replace(/[¿?¡!,;:()"']/g, " ")
     .split(/\s+/)
-    .filter((t) => t.length > 2);
+    .filter((t) => t.length > 2 && !SEARCH_STOPWORDS.has(t))
+    // Plural → singular para que "taladros percutores" calce con "Taladro Percutor"
+    .map((t) => (/\d/.test(t) ? t : t.length > 5 && t.endsWith("es") ? t.slice(0, -2) : t.length > 4 && t.endsWith("s") ? t.slice(0, -1) : t));
 
   if (terms.length === 0)
-    return products.filter((p) => p.status === "available").slice(0, 30);
+    return fallback ? products.filter((p) => p.status === "available").slice(0, 30) : [];
+
+  // Modelos y SKU con números: "dcb107" también calza con "Dcb 107"
+  const matches = (text, term) =>
+    text.includes(term) || (/\d/.test(term) && text.replace(/[\s.-]/g, "").includes(term.replace(/[.-]/g, "")));
 
   const scored = products
     .filter((p) => p.status === "available")
     .map((p) => {
-      const searchText =
-        `${p.name} ${p.brand || ""} ${p.sku || ""} ${p.description || ""}`
-          .toLowerCase()
-          .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "");
+      const nameText = normalize(`${p.name} ${p.brand || ""} ${p.sku || ""}`);
+      const descText = normalize(p.description || "");
 
+      // Lo que aparece en el nombre pesa más que lo que solo sale en la descripción
       let score = 0;
       for (const term of terms) {
-        if (searchText.includes(term)) score++;
+        if (matches(nameText, term)) score += 2;
+        else if (matches(descText, term)) score += 1;
       }
       return { product: p, score };
     })
@@ -270,9 +286,21 @@ function searchProducts(query, products) {
     .slice(0, 20);
 
   if (scored.length === 0)
-    return products.filter((p) => p.status === "available").slice(0, 15);
+    return fallback ? products.filter((p) => p.status === "available").slice(0, 15) : [];
 
   return scored.map((item) => item.product);
+}
+
+// Las preguntas de seguimiento ("¿cuánto vale?", "¿tienen stock?") no nombran el producto:
+// volver a incluir los productos que el modelo vio en el mensaje anterior para que no los dé por desconocidos
+function searchProductsInConversation(userMessage, contactId, products) {
+  const found = searchProducts(userMessage, products, false);
+  const previousIds = getHistory(contactId).length > 0 ? conversationHistory.get(contactId).productIds || [] : [];
+  for (const id of previousIds) {
+    const p = products.find((x) => x.id === id); // el del caché actual: stock y precio al día
+    if (p && !found.includes(p)) found.push(p);
+  }
+  return found.length > 0 ? found : searchProducts(userMessage, products);
 }
 
 function cleanDescription(html) {
@@ -302,8 +330,9 @@ function formatProductsForContext(products, includeSpecs = false) {
           : "Consultar stock";
       const brand = p.brand || "";
       const sku = p.sku || "";
+      // Jumpseller entrega el permalink sin "/" inicial
       const link = p.permalink
-        ? `https://alphaherramientas.cl${p.permalink}`
+        ? `https://alphaherramientas.cl/${p.permalink.replace(/^\//, "")}`
         : "";
       let line = `- ${p.name} | ${brand} | ${price} | ${stock} | SKU: ${sku} | ${link}`;
       if (includeSpecs) {
@@ -755,7 +784,7 @@ Cómo comprar:
 Envío a región específica (si hay una campaña vigente de envío, usa sus condiciones en vez de los $100.000):
 "Buenas! 📦 El costo de envío se muestra al agregar el producto al carrito y seleccionar tu dirección. Envíos en Santiago gratis sobre $100.000 👉 https://alphaherramientas.cl/"
 
-PRODUCTOS RELEVANTES DEL CATÁLOGO:
+PRODUCTOS RELEVANTES DEL CATÁLOGO (precio y stock vienen directo de la web y están al día; incluye los productos de los mensajes anteriores de esta conversación):
 {CATALOG}
 
 INFORMACIÓN DE LA PLANILLA DE LA TIENDA (la actualiza el equipo; REEMPLAZA a cualquier dato fijo o plantilla de arriba sobre el mismo tema: envíos, plazos, horarios, montos, promociones. Una campaña solo los reemplaza para lo que ella cubre):
@@ -933,7 +962,7 @@ async function askClaude(userMessage, contactId) {
   const firstMsg = contactId ? isFirstMessage(contactId) : true;
 
   const products = await fetchProducts();
-  const relevant = searchProducts(userMessage, products);
+  const relevant = searchProductsInConversation(userMessage, contactId, products);
   // Consulta comparativa: menos productos pero con ficha técnica incluida
   const comparing = isComparisonQuery(userMessage);
   const catalog = comparing
@@ -1010,6 +1039,8 @@ async function askClaude(userMessage, contactId) {
 
     addToHistory(contactId, "user", userMessage);
     addToHistory(contactId, "assistant", reply);
+    // Para las preguntas de seguimiento (ver searchProductsInConversation)
+    if (contactId) conversationHistory.get(contactId).productIds = relevant.slice(0, 20).map((p) => p.id);
 
     if (necesitaEscalar) {
       return reply + "\n\nQuiero ayudarte de la mejor manera. Escribe HUMANO para que un asesor continúe atendiéndote, o si prefieres llámanos al +56 9 7821 3479 👍";
